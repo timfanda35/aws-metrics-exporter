@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+.vscode
+*.md
+!README.md
+docker-compose.yaml
+Dockerfile
+config/
+secrets/
+*.test
+coverage.html

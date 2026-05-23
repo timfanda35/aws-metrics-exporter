@@ -1,0 +1,83 @@
+services:
+  exporter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aws-metrics-exporter:dev
+    container_name: aws-metrics-exporter
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      LOG_LEVEL: "info"
+      LOG_FORMAT: "json"
+      SCRAPE_TIMEOUT: "30s"
+      MAX_CONCURRENT_SCRAPES: "16"
+      MAX_SERIES_PER_REQUEST: "10000"
+      SHUTDOWN_GRACE: "10s"
+
+      # For local development with LocalStack, point the SDK at the
+      # local endpoint and use the LocalStack test credentials.
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      AWS_ENDPOINT_URL_CLOUDWATCH: "http://localstack:4566"
+
+      # In production on Cloud Run, omit the keys and set instead:
+      #   AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/CloudRunCloudWatchReader"
+      #   AWS_WEB_IDENTITY_TOKEN_AUDIENCE: "sts.amazonaws.com"   # default
+      # DEFAULT_ROLE_ARN may be used as a fallback when ?role_arn= is omitted.
+    depends_on:
+      - localstack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/exporter", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - default
+
+  # LocalStack provides a CloudWatch-compatible endpoint for local dev.
+  # Seed it after startup with awslocal:
+  #   awslocal cloudwatch put-metric-data --namespace AWS/EC2 \
+  #     --metric-name CPUUtilization --value 42 \
+  #     --dimensions InstanceId=i-0abc123
+  localstack:
+    image: localstack/localstack:latest
+    container_name: aws-metrics-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: "cloudwatch"
+      DEBUG: "0"
+    networks:
+      - default
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: aws-metrics-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    depends_on:
+      - exporter
+    restart: unless-stopped
+    networks:
+      - default
+
+volumes:
+  prometheus-data:
+    driver: local
+
+networks:
+  default:
+    name: aws-metrics-net

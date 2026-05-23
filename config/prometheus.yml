@@ -1,0 +1,56 @@
+global:
+  scrape_interval: 60s
+  scrape_timeout: 30s
+  evaluation_interval: 60s
+  external_labels:
+    monitor: aws-metrics-exporter
+
+scrape_configs:
+  # Scrape the exporter for Prometheus-format CloudWatch queries.
+  #
+  # Each "target" string is encoded as:
+  #   "<account_id>;<region>;<namespace>;<metric_name>"
+  # The relabel_configs below split it into the four query parameters
+  # the exporter expects, then rewrites __address__ so Prometheus
+  # actually dials the exporter container.
+  #
+  # When using OAM, all the listed account IDs should be linked from
+  # the source accounts to the monitoring account this exporter runs
+  # in (or carries the IAM role of).
+  - job_name: aws-cloudwatch
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets:
+          # Replace with real <account>;<region>;<namespace>;<metric> tuples.
+          - "000000000000;us-east-1;AWS/EC2;CPUUtilization"
+          - "000000000000;us-east-1;AWS/EC2;NetworkIn"
+        labels:
+          source: aws-cloudwatch
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "([^;]+);([^;]+);([^;]+);(.+)"
+        target_label: __param_account_id
+        replacement: "$1"
+      - source_labels: [__address__]
+        regex: "([^;]+);([^;]+);([^;]+);(.+)"
+        target_label: __param_region
+        replacement: "$2"
+      - source_labels: [__address__]
+        regex: "([^;]+);([^;]+);([^;]+);(.+)"
+        target_label: __param_namespace
+        replacement: "$3"
+      - source_labels: [__address__]
+        regex: "([^;]+);([^;]+);([^;]+);(.+)"
+        target_label: __param_metric_name
+        replacement: "$4"
+      # Surface the account as an instance label so series are easy to identify.
+      - source_labels: [__param_account_id]
+        target_label: instance
+      - target_label: __address__
+        replacement: "exporter:8080"
+
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - "localhost:9090"
