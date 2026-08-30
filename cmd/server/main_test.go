@@ -26,6 +26,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.MaxConcurrent != 16 || cfg.MaxSeries != 10000 {
 		t.Errorf("concurrency defaults wrong: %d / %d", cfg.MaxConcurrent, cfg.MaxSeries)
 	}
+	if cfg.PreserveCWTimestamp {
+		t.Errorf("PreserveCWTimestamp = true, want false by default")
+	}
 }
 
 func TestLoadConfig_Overrides(t *testing.T) {
@@ -40,6 +43,7 @@ func TestLoadConfig_Overrides(t *testing.T) {
 	t.Setenv("AWS_REGION", "ap-northeast-1")
 	t.Setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/X")
 	t.Setenv("DEFAULT_ROLE_ARN", "arn:aws:iam::123456789012:role/Y")
+	t.Setenv("PRESERVE_CW_TIMESTAMP", "true")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -57,6 +61,9 @@ func TestLoadConfig_Overrides(t *testing.T) {
 	if cfg.AWSRegion != "ap-northeast-1" || cfg.AWSRoleARN == "" || cfg.DefaultRoleARN == "" {
 		t.Errorf("aws env not honoured: %+v", cfg)
 	}
+	if !cfg.PreserveCWTimestamp {
+		t.Errorf("PreserveCWTimestamp = false, want true")
+	}
 }
 
 func TestLoadConfig_Invalid(t *testing.T) {
@@ -71,6 +78,7 @@ func TestLoadConfig_Invalid(t *testing.T) {
 		{"concurrent zero", "MAX_CONCURRENT_SCRAPES", "0", "MAX_CONCURRENT_SCRAPES"},
 		{"series zero", "MAX_SERIES_PER_REQUEST", "0", "MAX_SERIES_PER_REQUEST"},
 		{"shutdown zero", "SHUTDOWN_GRACE", "0s", "SHUTDOWN_GRACE"},
+		{"preserve timestamp", "PRESERVE_CW_TIMESTAMP", "yes", "PRESERVE_CW_TIMESTAMP"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,7 +125,7 @@ func clearEnv(t *testing.T) {
 		"MAX_CONCURRENT_SCRAPES", "MAX_SERIES_PER_REQUEST", "SHUTDOWN_GRACE",
 		"AWS_REGION", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
 		"AWS_WEB_IDENTITY_TOKEN_AUDIENCE", "GCP_ID_TOKEN_URL",
-		"DEFAULT_ROLE_ARN", "ROLE_SESSION_NAME",
+		"DEFAULT_ROLE_ARN", "ROLE_SESSION_NAME", "PRESERVE_CW_TIMESTAMP",
 	} {
 		t.Setenv(k, "")
 	}

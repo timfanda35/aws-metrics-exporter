@@ -16,7 +16,8 @@ Sibling projects in the same family:
 - Multi-account: each request can target a different AWS account (OAM source account)
 - Per-request `sts:AssumeRole` override (`?role_arn=`) when OAM is not set up
 - All CloudWatch metrics emitted as Prometheus **gauges**; statistic (Average/Sum/Min/Max/SampleCount) becomes a `statistic` label
-- CloudWatch observation timestamps preserved on each sample (`TimestampMs`)
+- Prometheus-assigned sample timestamps by default (avoids TSDB out-of-bounds/duplicate-sample rejection from CloudWatch ingest lag); opt into CloudWatch's own timestamp via `PRESERVE_CW_TIMESTAMP=true`
+- `?time_offset=` shifts the CloudWatch query window back to compensate for a namespace's known ingest delay
 - Streaming response, per-request timeout, concurrency cap
 - Single static binary, distroless container
 - Workload Identity Federation primary: runs on GCP Cloud Run with no static AWS keys
@@ -110,10 +111,11 @@ The exporter fetches a GCP ID token from the Cloud Run metadata server on each S
 | `dimensions` | no (repeatable) | — | `Name=Value`; applied to every `metric_name`. |
 | `period` | no | `60` | CloudWatch aggregation period (seconds). Must be 1/5/10/30 or a multiple of 60. |
 | `interval` | no | `5m` | Query window (Go duration). |
+| `time_offset` | no | `0` | Shift the query window back (Go duration, must be ≥ 0): `EndTime = now - time_offset`. Use when a namespace's CloudWatch ingest delay exceeds the default window. |
 | `role_arn` | no | (`DEFAULT_ROLE_ARN`) | If set, wraps base credentials with `sts:AssumeRole`. Cached per ARN. |
 | `external_id` | no | — | Honoured only with `role_arn`. |
 
-Response: `text/plain; version=0.0.4; charset=utf-8`. Every metric is a Prometheus gauge with the latest CloudWatch datapoint (timestamp preserved as `TimestampMs`). Labels: `account_id`, `region`, `statistic`, optional `unit`, plus one label per dimension (sanitised; collisions with reserved names get a `dim_` prefix).
+Response: `text/plain; version=0.0.4; charset=utf-8`. Every metric is a Prometheus gauge with the latest CloudWatch datapoint. By default the sample carries no explicit timestamp — Prometheus assigns scrape time; set `PRESERVE_CW_TIMESTAMP=true` to emit CloudWatch's own datapoint timestamp instead. Labels: `account_id`, `region`, `statistic`, optional `unit`, plus one label per dimension (sanitised; collisions with reserved names get a `dim_` prefix).
 
 Example:
 
@@ -132,7 +134,7 @@ Response excerpt:
 ```
 # HELP aws_ec2_cpuutilization AWS/EC2 CPUUtilization
 # TYPE aws_ec2_cpuutilization gauge
-aws_ec2_cpuutilization{account_id="123456789012",region="us-east-1",statistic="Average",InstanceId="i-0abc123"} 17.42 1716480000000
+aws_ec2_cpuutilization{account_id="123456789012",region="us-east-1",statistic="Average",InstanceId="i-0abc123"} 17.42
 ```
 
 ### `GET /healthz`
@@ -167,6 +169,7 @@ Liveness only. Returns `200 OK` with `{"status":"ok"}`. Does not call AWS — so
 | `AWS_WEB_IDENTITY_TOKEN_AUDIENCE` | `sts.amazonaws.com` | Audience for the GCP ID token. |
 | `GCP_ID_TOKEN_URL` | metadata-server default | Override for tests. |
 | `DEFAULT_ROLE_ARN` | — | Fallback `role_arn` when query param omits it. |
+| `PRESERVE_CW_TIMESTAMP` | `false` | When `true`, emits CloudWatch's own datapoint timestamp as `TimestampMs` instead of leaving it unset. Don't combine with `?time_offset=` — the offset would push the emitted timestamp even further into the past, reintroducing the rejection issue this flag's default avoids. |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | Labels STS sessions in CloudTrail. |
 
 CLI flag: `--healthcheck` does a loopback `GET /healthz` and exits 0/1. Used by Dockerfile / compose `HEALTHCHECK`.
@@ -259,8 +262,9 @@ config/              # Prometheus scrape config (dev)
 - Container runs as `nonroot` on `gcr.io/distroless/static-debian12`; no shell, CA bundle included.
 - `--healthcheck` flag probes `/healthz` on loopback and exits 0/1 — used by the docker-compose `HEALTHCHECK`.
 - AWS SDK v2 clients are cached per `(region, roleARN)` for the lifetime of the process; restart to pick up policy changes that require a fresh STS exchange.
-- CloudWatch observation timestamps are preserved on each Prometheus sample (`TimestampMs`), so CloudWatch's ~60–120s emission lag does not move data to the scrape clock.
-- Only the **latest** datapoint per series is emitted per scrape; set `interval` large enough that at least one datapoint lands.
+- By default, Prometheus samples carry no explicit timestamp — Prometheus assigns scrape time, so a stalled CloudWatch datapoint just re-emits its last known value at the new scrape time (a flat line) instead of Prometheus's TSDB rejecting it as "out of bounds" or a "duplicate sample" (which is what happens if you instead preserve CloudWatch's own, potentially delayed or repeated, timestamp via `PRESERVE_CW_TIMESTAMP=true`).
+- Use `?time_offset=` to shift the CloudWatch query window back for namespaces with chronic ingest delay, so the "latest" datapoint fetched is more likely to actually exist yet. Don't combine `time_offset` with `PRESERVE_CW_TIMESTAMP=true` — together they make the emitted timestamp even older, reintroducing the rejection problem.
+- Only the **latest** datapoint per series is emitted per scrape; set `interval` (and, for chronically delayed namespaces, `time_offset`) large enough that at least one datapoint lands.
 
 ## License
 

@@ -61,14 +61,16 @@ aws-metrics-exporter/
   - 每個 `MetricDataQuery` 都會設定 `AccountId`——這是 OAM 跨帳戶查詢的關鍵
   - `(MetricName × Statistic)` cross product，最多 500 queries / call，超過自動 chunk
   - 跟隨 `NextToken` 最多 5 hop
-  - `ScanBy=TimestampDescending`，只取 latest datapoint，保留 CloudWatch 原始 timestamp 為 Prometheus sample 的 `TimestampMs`
+  - `ScanBy=TimestampDescending`，只取 latest datapoint
+  - `TimeOffset`（來自 `?time_offset=`）把查詢視窗往回推：`EndTime = now - TimeOffset`，`StartTime = EndTime - Interval`，用來補償特定 namespace 已知的 CloudWatch ingest delay
+  - 預設**不**在 sample 上設 `TimestampMs`，讓 Prometheus 用 scrape time 蓋章——CloudWatch 資料延遲或兩次 scrape 間資料未更新時，帶入 CloudWatch 原始 timestamp 會讓 Prometheus TSDB（要求同一 series 時間戳記嚴格遞增）判定為 "out of bounds" 或 "duplicate sample" 而丟棄。設定 `PRESERVE_CW_TIMESTAMP=true` 可還原成保留 CloudWatch 原始 timestamp 的舊行為（**不要**和 `time_offset` 一起用，兩者疊加會讓 timestamp 更舊，重新觸發同樣的拒收問題）
 - 所有 metric **一律 gauge**；`statistic` 變成 label
 - Client cache：key = `region + "|" + roleARN`。`roleARN` 非空時，自動以 `stscreds.NewAssumeRoleProvider` 包裝 base credentials
 
 ### `internal/handler`
 - 實作 `GET /metrics` 與 `GET /healthz`
 - `/metrics`：
-  - 嚴格參數驗證（正則）：`account_id`（12 位數字）、`region`、`namespace`、`metric_name`（可重複）、`statistic`、`dimensions`（`Name=Value`）、`period`（1/5/10/30 或 60 的倍數）、`interval`（Go duration）、`role_arn`、`external_id`
+  - 嚴格參數驗證（正則）：`account_id`（12 位數字）、`region`、`namespace`、`metric_name`（可重複）、`statistic`、`dimensions`（`Name=Value`）、`period`（1/5/10/30 或 60 的倍數）、`interval`（Go duration）、`time_offset`（Go duration，需 ≥ 0）、`role_arn`、`external_id`
   - **不允許** `account_id` 重複——一個 request 只查一個帳戶；多帳戶 fan-out 由 Prometheus relabel_configs 處理
   - Non-blocking semaphore（`MAX_CONCURRENT_SCRAPES`）→ 滿載時 429 + `Retry-After: 1`
   - Per-request `context.WithTimeout(SCRAPE_TIMEOUT)`
@@ -97,6 +99,7 @@ aws-metrics-exporter/
 | `dimensions` | ❌ 可重複 | — | `Name=Value`；套用到每個 metric_name。 |
 | `period` | ❌ | `60` | CloudWatch period（秒）。 |
 | `interval` | ❌ | `5m` | 查詢時間視窗（Go duration）。 |
+| `time_offset` | ❌ | `0` | 把查詢視窗往回推移（Go duration，需 ≥ 0）：`EndTime = now - time_offset`。用於補償特定 namespace 的 CloudWatch ingest delay。 |
 | `role_arn` | ❌ | (`DEFAULT_ROLE_ARN`) | 觸發 per-request `sts:AssumeRole`。 |
 | `external_id` | ❌ | — | 僅 `role_arn` 一起用才有效。 |
 
@@ -141,6 +144,7 @@ Per-request `?role_arn=`（可選）會在 base credentials 上加一層 `stscre
 | `GCP_ID_TOKEN_URL` | metadata-server 預設 | 測試時可覆寫 |
 | `DEFAULT_ROLE_ARN` | — | `?role_arn=` 省略時的 fallback |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | CloudTrail session 名稱 |
+| `PRESERVE_CW_TIMESTAMP` | `false` | 設為 `true` 時在 sample 上保留 CloudWatch 原始 `TimestampMs`（舊行為）。**不要**和 `?time_offset=` 一起用。 |
 
 ---
 

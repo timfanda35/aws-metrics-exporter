@@ -201,8 +201,85 @@ func TestConvert_LatestDatapointOnly(t *testing.T) {
 	if got := m.GetGauge().GetValue(); got != 42.5 {
 		t.Errorf("value = %v, want 42.5 (latest)", got)
 	}
+	if m.TimestampMs != nil {
+		t.Errorf("TimestampMs = %d, want unset by default (Prometheus assigns scrape time)", m.GetTimestampMs())
+	}
+}
+
+func TestConvert_PreserveTimestampOptIn(t *testing.T) {
+	stub := &stubCloudWatch{
+		fn: func(_ *cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error) {
+			return &cloudwatch.GetMetricDataOutput{
+				MetricDataResults: []cwtypes.MetricDataResult{{
+					Id:         aws.String("q0"),
+					Label:      aws.String("CPUUtilization"),
+					Values:     []float64{42.5},
+					Timestamps: []time.Time{time.Unix(1700000060, 0)},
+				}},
+			}, nil
+		},
+	}
+	c := NewCloudWatchCollector(stub, Options{PreserveTimestamp: true})
+	fams, err := c.Collect(context.Background(), QueryParams{
+		AccountID: "123456789012", Region: "us-east-1", Namespace: "AWS/EC2",
+		MetricNames: []string{"CPUUtilization"},
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	m := fams[0].Metric[0]
 	if got := m.GetTimestampMs(); got != 1700000060000 {
-		t.Errorf("timestamp = %d, want 1700000060000", got)
+		t.Errorf("timestamp = %d, want 1700000060000 (PreserveTimestamp opt-in)", got)
+	}
+}
+
+func TestCollect_TimeOffsetShiftsQueryWindow(t *testing.T) {
+	var captured *cloudwatch.GetMetricDataInput
+	stub := &stubCloudWatch{
+		fn: func(in *cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error) {
+			captured = in
+			return &cloudwatch.GetMetricDataOutput{}, nil
+		},
+	}
+	c := NewCloudWatchCollector(stub, Options{Now: func() time.Time { return time.Unix(1700000000, 0) }})
+
+	_, err := c.Collect(context.Background(), QueryParams{
+		AccountID: "1", Region: "us-east-1", Namespace: "AWS/EC2", MetricNames: []string{"X"},
+		Period: 60, Interval: 5 * time.Minute, TimeOffset: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	wantEnd := time.Unix(1700000000-120, 0)
+	wantStart := wantEnd.Add(-5 * time.Minute)
+	if !aws.ToTime(captured.EndTime).Equal(wantEnd) {
+		t.Errorf("EndTime = %v, want %v", aws.ToTime(captured.EndTime), wantEnd)
+	}
+	if !aws.ToTime(captured.StartTime).Equal(wantStart) {
+		t.Errorf("StartTime = %v, want %v", aws.ToTime(captured.StartTime), wantStart)
+	}
+}
+
+func TestCollect_NegativeTimeOffsetClampedToZero(t *testing.T) {
+	var captured *cloudwatch.GetMetricDataInput
+	stub := &stubCloudWatch{
+		fn: func(in *cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error) {
+			captured = in
+			return &cloudwatch.GetMetricDataOutput{}, nil
+		},
+	}
+	c := NewCloudWatchCollector(stub, Options{Now: func() time.Time { return time.Unix(1700000000, 0) }})
+
+	_, err := c.Collect(context.Background(), QueryParams{
+		AccountID: "1", Region: "us-east-1", Namespace: "AWS/EC2", MetricNames: []string{"X"},
+		Period: 60, Interval: 5 * time.Minute, TimeOffset: -time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	wantEnd := time.Unix(1700000000, 0)
+	if !aws.ToTime(captured.EndTime).Equal(wantEnd) {
+		t.Errorf("EndTime = %v, want %v (negative offset clamped to zero)", aws.ToTime(captured.EndTime), wantEnd)
 	}
 }
 
@@ -234,8 +311,8 @@ func TestPromMetricName(t *testing.T) {
 	}{
 		{"AWS/EC2", "CPUUtilization", "aws_ec2_cpuutilization"},
 		{"AWS/ApplicationELB", "RequestCount", "aws_applicationelb_requestcount"},
-		{"AWS/S3", "5xxErrors", "aws_s3_5xxerrors"},     // leading char "a" is valid; no prepend
-		{"5XX/Foo", "Bar", "aws_5xx_foo_bar"},           // leading digit → prepend aws_
+		{"AWS/S3", "5xxErrors", "aws_s3_5xxerrors"}, // leading char "a" is valid; no prepend
+		{"5XX/Foo", "Bar", "aws_5xx_foo_bar"},       // leading digit → prepend aws_
 		{"My/Custom", "Foo-Bar", "my_custom_foo_bar"},
 		{"", "", "aws_metric"},
 	}

@@ -40,9 +40,9 @@ const (
 	defaultInterval     = 5 * time.Minute
 	defaultMaxSeries    = 10000
 	defaultPeriod       = 60
-	maxQueriesPerCall   = 500  // CloudWatch hard limit on MetricDataQueries
-	maxPaginationTokens = 5    // cap NextToken follow-ups to bound work per scrape
-	identifierPrefix    = "q"  // MetricDataQuery.Id pattern: ^[a-z][a-zA-Z0-9_]*$
+	maxQueriesPerCall   = 500 // CloudWatch hard limit on MetricDataQueries
+	maxPaginationTokens = 5   // cap NextToken follow-ups to bound work per scrape
+	identifierPrefix    = "q" // MetricDataQuery.Id pattern: ^[a-z][a-zA-Z0-9_]*$
 )
 
 // promNameSanitizer / promLabelSanitizer / promRunCollapse turn
@@ -102,6 +102,15 @@ type QueryParams struct {
 	// Interval is the query window (EndTime - StartTime). Zero defaults
 	// to 5 minutes.
 	Interval time.Duration
+
+	// TimeOffset shifts the CloudWatch query window back in time:
+	// EndTime = now - TimeOffset, StartTime = EndTime - Interval. Zero
+	// (default) queries up to now. Use this to compensate for a
+	// namespace's typical CloudWatch ingest delay (mirrors
+	// gcp-metrics-exporter's `time_offset` param). Negative values are
+	// clamped to zero; the handler is the real validation layer for
+	// user input.
+	TimeOffset time.Duration
 }
 
 // Dimension is a CloudWatch dimension Name/Value pair.
@@ -122,6 +131,15 @@ type Options struct {
 	// deterministic clock; production leaves it nil and the collector
 	// uses [time.Now].
 	Now func() time.Time
+
+	// PreserveTimestamp, when true, sets the Prometheus sample's
+	// TimestampMs from CloudWatch's own datapoint timestamp. Default
+	// false: TimestampMs is left unset and Prometheus assigns the
+	// scrape time instead, because CloudWatch ingest lag (or a stalled
+	// scrape-to-scrape refresh) otherwise causes "out of bounds" /
+	// "duplicate sample" rejections in Prometheus's TSDB, which
+	// requires strictly increasing timestamps per series.
+	PreserveTimestamp bool
 }
 
 // Collector is the abstraction the handler depends on. The production
@@ -133,9 +151,10 @@ type Collector interface {
 
 // CloudWatchCollector queries CloudWatch and emits Prometheus families.
 type CloudWatchCollector struct {
-	client    CloudWatchAPI
-	maxSeries int
-	now       func() time.Time
+	client            CloudWatchAPI
+	maxSeries         int
+	now               func() time.Time
+	preserveTimestamp bool
 }
 
 // NewCloudWatchCollector wires a [CloudWatchAPI] into a stateless
@@ -143,9 +162,10 @@ type CloudWatchCollector struct {
 // defaults.
 func NewCloudWatchCollector(client CloudWatchAPI, opts Options) *CloudWatchCollector {
 	c := &CloudWatchCollector{
-		client:    client,
-		maxSeries: opts.MaxSeries,
-		now:       opts.Now,
+		client:            client,
+		maxSeries:         opts.MaxSeries,
+		now:               opts.Now,
+		preserveTimestamp: opts.PreserveTimestamp,
 	}
 	if c.maxSeries <= 0 {
 		c.maxSeries = defaultMaxSeries
@@ -158,10 +178,12 @@ func NewCloudWatchCollector(client CloudWatchAPI, opts Options) *CloudWatchColle
 
 // Collect issues one or more GetMetricData calls, follows NextToken up
 // to [maxPaginationTokens] times, and converts the merged result into
-// Prometheus families. The latest datapoint per series is emitted (with
-// its CloudWatch timestamp preserved on the sample) and earlier points
-// are dropped — this matches the scrape model where each sample is the
-// current observation.
+// Prometheus families. The latest datapoint per series is emitted and
+// earlier points are dropped — this matches the scrape model where each
+// sample is the current observation. By default the sample carries no
+// explicit timestamp (Prometheus assigns scrape time); set
+// [Options.PreserveTimestamp] to use CloudWatch's own datapoint
+// timestamp instead.
 func (c *CloudWatchCollector) Collect(ctx context.Context, params QueryParams) ([]*dto.MetricFamily, error) {
 	if params.AccountID == "" {
 		return nil, fmt.Errorf("collector: AccountID is required")
@@ -192,7 +214,12 @@ func (c *CloudWatchCollector) Collect(ctx context.Context, params QueryParams) (
 	queries, idToCtx := buildMetricDataQueries(params, stats, period)
 
 	now := c.now()
-	startTime := now.Add(-interval)
+	offset := params.TimeOffset
+	if offset < 0 {
+		offset = 0
+	}
+	endTime := now.Add(-offset)
+	startTime := endTime.Add(-interval)
 
 	results := make([]cwtypes.MetricDataResult, 0, len(queries))
 	for _, chunk := range chunkQueries(queries, maxQueriesPerCall) {
@@ -201,7 +228,7 @@ func (c *CloudWatchCollector) Collect(ctx context.Context, params QueryParams) (
 			in := &cloudwatch.GetMetricDataInput{
 				MetricDataQueries: chunk,
 				StartTime:         aws.Time(startTime),
-				EndTime:           aws.Time(now),
+				EndTime:           aws.Time(endTime),
 				ScanBy:            cwtypes.ScanByTimestampDescending,
 				NextToken:         nextToken,
 			}
@@ -220,7 +247,7 @@ func (c *CloudWatchCollector) Collect(ctx context.Context, params QueryParams) (
 		}
 	}
 
-	return convertToFamilies(params, results, idToCtx), nil
+	return convertToFamilies(params, results, idToCtx, c.preserveTimestamp), nil
 }
 
 // queryContext records the originating CloudWatch identifiers for one
@@ -298,9 +325,10 @@ func chunkQueries(qs []cwtypes.MetricDataQuery, size int) [][]cwtypes.MetricData
 
 // convertToFamilies groups MetricDataResult rows by (namespace,
 // metric_name) into Prometheus metric families. The latest datapoint
-// per row is emitted as a single gauge sample with its CloudWatch
-// timestamp preserved.
-func convertToFamilies(params QueryParams, results []cwtypes.MetricDataResult, ctxByID map[string]queryContext) []*dto.MetricFamily {
+// per row is emitted as a single gauge sample. TimestampMs is left
+// unset (Prometheus assigns scrape time) unless preserveTimestamp is
+// true, in which case CloudWatch's own datapoint timestamp is used.
+func convertToFamilies(params QueryParams, results []cwtypes.MetricDataResult, ctxByID map[string]queryContext, preserveTimestamp bool) []*dto.MetricFamily {
 	families := make(map[string]*dto.MetricFamily)
 	order := make([]string, 0)
 
@@ -331,21 +359,20 @@ func convertToFamilies(params QueryParams, results []cwtypes.MetricDataResult, c
 		}
 
 		// ScanBy=TimestampDescending guarantees Values[0] is the
-		// latest datapoint; preserve its CloudWatch timestamp on the
-		// Prometheus sample so older scrapes do not overwrite newer
-		// observations during ingestion.
+		// latest datapoint. TimestampMs is only set when
+		// preserveTimestamp is true (opt-in); by default the sample
+		// carries no explicit timestamp so Prometheus assigns scrape
+		// time, avoiding TSDB rejection of delayed/duplicate
+		// CloudWatch timestamps.
 		val := r.Values[0]
-		ts := int64(0)
-		if len(r.Timestamps) > 0 {
-			ts = r.Timestamps[0].UnixMilli()
-		}
-
 		m := &dto.Metric{
 			Label: labels,
 			Gauge: &dto.Gauge{Value: proto.Float64(val)},
 		}
-		if ts > 0 {
-			m.TimestampMs = proto.Int64(ts)
+		if preserveTimestamp && len(r.Timestamps) > 0 {
+			if ts := r.Timestamps[0].UnixMilli(); ts > 0 {
+				m.TimestampMs = proto.Int64(ts)
+			}
 		}
 		fam.Metric = append(fam.Metric, m)
 	}
