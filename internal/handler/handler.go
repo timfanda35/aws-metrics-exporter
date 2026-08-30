@@ -48,10 +48,10 @@ var (
 
 // Limits configures per-request policy on the [MetricsHandler].
 type Limits struct {
-	ScrapeTimeout   time.Duration
-	MaxConcurrent   int
-	MaxSeries       int
-	DefaultRoleARN  string
+	ScrapeTimeout  time.Duration
+	MaxConcurrent  int
+	MaxSeries      int
+	DefaultRoleARN string
 }
 
 // CollectorForKey returns a [collector.Collector] for the given
@@ -121,6 +121,7 @@ type requestParams struct {
 	dimensions  []collector.Dimension
 	period      int32
 	interval    time.Duration
+	timeOffset  time.Duration
 	roleARN     string
 	externalID  string
 }
@@ -202,6 +203,15 @@ func parseRequest(r *http.Request, limits Limits) (*requestParams, string, int) 
 		interval = d
 	}
 
+	timeOffset := time.Duration(0)
+	if v := q.Get("time_offset"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return nil, fmt.Sprintf("invalid time_offset %q: must be a non-negative Go duration", v), http.StatusBadRequest
+		}
+		timeOffset = d
+	}
+
 	roleARN := q.Get("role_arn")
 	if roleARN == "" {
 		roleARN = limits.DefaultRoleARN
@@ -224,6 +234,7 @@ func parseRequest(r *http.Request, limits Limits) (*requestParams, string, int) 
 		dimensions:  dims,
 		period:      period,
 		interval:    interval,
+		timeOffset:  timeOffset,
 		roleARN:     roleARN,
 		externalID:  externalID,
 	}, "", 0
@@ -303,6 +314,7 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Dimensions:  params.dimensions,
 		Period:      params.period,
 		Interval:    params.interval,
+		TimeOffset:  params.timeOffset,
 	})
 	awsLatency := elapsedMs(h.now(), awsStart)
 

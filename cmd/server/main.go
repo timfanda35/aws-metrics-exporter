@@ -46,6 +46,7 @@ type config struct {
 	GCPIDTokenURL       string
 	DefaultRoleARN      string
 	RoleSessionName     string
+	PreserveCWTimestamp bool
 }
 
 const defaultPort = 8080
@@ -125,6 +126,14 @@ func loadConfig() (config, error) {
 			return config{}, fmt.Errorf("invalid SHUTDOWN_GRACE %q: must be a positive Go duration", v)
 		}
 		cfg.ShutdownGrace = d
+	}
+
+	if v := os.Getenv("PRESERVE_CW_TIMESTAMP"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid PRESERVE_CW_TIMESTAMP %q: must be a boolean", v)
+		}
+		cfg.PreserveCWTimestamp = b
 	}
 
 	return cfg, nil
@@ -229,7 +238,10 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
-		return collector.NewCloudWatchCollector(cli, collector.Options{MaxSeries: limits.MaxSeries}), nil
+		return collector.NewCloudWatchCollector(cli, collector.Options{
+			MaxSeries:         limits.MaxSeries,
+			PreserveTimestamp: cfg.PreserveCWTimestamp,
+		}), nil
 	}
 
 	metricsHandler := handler.NewMetricsHandler(factory, limits, logger)
@@ -260,6 +272,7 @@ func main() {
 		slog.Duration("shutdown_grace", cfg.ShutdownGrace),
 		slog.Bool("wif_enabled", cfg.AWSRoleARN != ""),
 		slog.Bool("default_role_arn_set", cfg.DefaultRoleARN != ""),
+		slog.Bool("preserve_cw_timestamp", cfg.PreserveCWTimestamp),
 	)
 
 	select {

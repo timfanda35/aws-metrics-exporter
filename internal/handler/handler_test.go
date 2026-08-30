@@ -21,12 +21,14 @@ import (
 
 // fakeCollector implements [collector.Collector] for handler tests.
 type fakeCollector struct {
-	families []*dto.MetricFamily
-	err      error
-	delay    time.Duration
+	families  []*dto.MetricFamily
+	err       error
+	delay     time.Duration
+	gotParams collector.QueryParams
 }
 
-func (f *fakeCollector) Collect(ctx context.Context, _ collector.QueryParams) ([]*dto.MetricFamily, error) {
+func (f *fakeCollector) Collect(ctx context.Context, params collector.QueryParams) ([]*dto.MetricFamily, error) {
+	f.gotParams = params
 	if f.delay > 0 {
 		select {
 		case <-time.After(f.delay):
@@ -68,6 +70,8 @@ func TestParseRequest_RequiredParams(t *testing.T) {
 		{"external_id without role", "/metrics?account_id=123456789012&region=us-east-1&namespace=AWS/EC2&metric_name=X&external_id=xyz", "external_id requires role_arn"},
 		{"bad interval", "/metrics?account_id=123456789012&region=us-east-1&namespace=AWS/EC2&metric_name=X&interval=zzz", "invalid interval"},
 		{"bad dimensions", "/metrics?account_id=123456789012&region=us-east-1&namespace=AWS/EC2&metric_name=X&dimensions=NoEquals", "Name=Value"},
+		{"bad time_offset", "/metrics?account_id=123456789012&region=us-east-1&namespace=AWS/EC2&metric_name=X&time_offset=zzz", "invalid time_offset"},
+		{"negative time_offset", "/metrics?account_id=123456789012&region=us-east-1&namespace=AWS/EC2&metric_name=X&time_offset=-30s", "invalid time_offset"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,6 +104,25 @@ func TestParseRequest_Defaults(t *testing.T) {
 	}
 	if p.roleARN != "arn:aws:iam::999999999999:role/Default" {
 		t.Errorf("roleARN = %q, want default fallback", p.roleARN)
+	}
+	if p.timeOffset != 0 {
+		t.Errorf("timeOffset = %v, want 0", p.timeOffset)
+	}
+}
+
+func TestServeHTTP_TimeOffsetPassthrough(t *testing.T) {
+	fake := &fakeCollector{families: []*dto.MetricFamily{}}
+	h := NewMetricsHandler(factoryReturning(fake), Limits{}, discardLogger())
+
+	r := httptest.NewRequest(http.MethodGet, validQuery()+"&time_offset=2m", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if fake.gotParams.TimeOffset != 2*time.Minute {
+		t.Errorf("collector.QueryParams.TimeOffset = %v, want 2m", fake.gotParams.TimeOffset)
 	}
 }
 
@@ -172,10 +195,10 @@ type stubAPIError struct {
 	code, msg string
 }
 
-func (s *stubAPIError) Error() string                       { return s.code + ": " + s.msg }
-func (s *stubAPIError) ErrorCode() string                   { return s.code }
-func (s *stubAPIError) ErrorMessage() string                { return s.msg }
-func (s *stubAPIError) ErrorFault() smithy.ErrorFault       { return smithy.FaultUnknown }
+func (s *stubAPIError) Error() string                 { return s.code + ": " + s.msg }
+func (s *stubAPIError) ErrorCode() string             { return s.code }
+func (s *stubAPIError) ErrorMessage() string          { return s.msg }
+func (s *stubAPIError) ErrorFault() smithy.ErrorFault { return smithy.FaultUnknown }
 
 func TestMapError(t *testing.T) {
 	cases := []struct {

@@ -119,6 +119,15 @@ func TestExporter_EndToEnd(t *testing.T) {
 			t.Errorf("body missing %q in:\n%s", want, bodyStr)
 		}
 	}
+
+	// Regression guard: by default the sample must carry no explicit
+	// CloudWatch timestamp (Prometheus assigns scrape time), otherwise
+	// delayed/duplicate CloudWatch timestamps get rejected by
+	// Prometheus's TSDB. The stub's datapoint timestamp is
+	// 1700000060 -> 1700000060000ms; it must not appear in the body.
+	if strings.Contains(bodyStr, "1700000060000") {
+		t.Errorf("body contains explicit CloudWatch timestamp by default:\n%s", bodyStr)
+	}
 }
 
 func TestExporter_HealthEndpoint(t *testing.T) {
