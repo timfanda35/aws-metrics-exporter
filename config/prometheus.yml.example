@@ -1,0 +1,89 @@
+# Copy to config/prometheus.yml (gitignored) and edit the params below:
+#   cp config/prometheus.yml.example config/prometheus.yml
+#
+# `targets` is only the exporter address; every query argument lives in
+# `params` (Prometheus turns each list into repeated query args, e.g.
+# ?account_id=...&metric_name=CPUUtilization&metric_name=NetworkIn).
+#
+# One exporter request queries ONE account / region / namespace, so add one
+# job per (account, region, namespace); `metric_name`, `statistic` and
+# `dimensions` may list several values. With OAM, every listed account must be
+# linked to the monitoring account this exporter runs in (or whose role it
+# carries).
+global:
+  scrape_interval: 60s
+  scrape_timeout: 25s
+  evaluation_interval: 60s
+  external_labels:
+    monitor: aws-metrics-exporter
+
+scrape_configs:
+  # EDIT ME: one job per (account, region, namespace, statistic).
+  #
+  # Match the AWS console: EC2 basic monitoring publishes one datapoint per
+  # 5 minutes (use period 60 with detailed monitoring). The exporter emits
+  # CloudWatch's own timestamp (PRESERVE_CW_TIMESTAMP=true), so each sample
+  # lands at the start of its bucket like the console graph. `interval` is
+  # three periods so the newest published bucket (published a few minutes
+  # late) is always inside the query window.
+  - job_name: aws-ec2-cpu
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["exporter:8080"]
+        labels:
+          source: aws-cloudwatch
+    params:
+      account_id: ["000000000000"]
+      region: ["us-east-1"]
+      namespace: ["AWS/EC2"]
+      metric_name: ["CPUUtilization"]
+      statistic: ["Average"]
+      discover_dimension: ["InstanceId"]
+      period: ["300"]
+      interval: ["15m"]
+      # dimensions: ["InstanceId=i-0abc123"]
+      # role_arn: ["arn:aws:iam::000000000000:role/CloudWatchReader"]
+      # external_id: ["..."]
+
+  # NetworkIn is bytes per period, so use Sum (as the console does).
+  - job_name: aws-ec2-network
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["exporter:8080"]
+        labels:
+          source: aws-cloudwatch
+    params:
+      account_id: ["000000000000"]
+      region: ["us-east-1"]
+      namespace: ["AWS/EC2"]
+      metric_name: ["NetworkIn"]
+      statistic: ["Sum"]
+      discover_dimension: ["InstanceId"]
+      period: ["300"]
+      interval: ["15m"]
+
+  # Namespaces with a known CloudWatch ingest delay: shift the query window
+  # back with time_offset so the "latest" datapoint actually exists yet.
+  # Don't combine with PRESERVE_CW_TIMESTAMP=true unless you accept older
+  # timestamps (the point is then stored even further behind real time).
+  # - job_name: aws-billing
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["exporter:8080"]
+  #       labels:
+  #         source: aws-cloudwatch
+  #   params:
+  #     account_id: ["000000000000"]
+  #     region: ["us-east-1"]
+  #     namespace: ["AWS/Billing"]
+  #     metric_name: ["EstimatedCharges"]
+  #     statistic: ["Maximum"]
+  #     time_offset: ["10m"]
+
+  # Optional: scrape Prometheus's own metrics for self-monitoring.
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - "localhost:9090"

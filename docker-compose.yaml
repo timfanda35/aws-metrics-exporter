@@ -7,28 +7,8 @@ services:
     container_name: aws-metrics-exporter
     ports:
       - "8080:8080"
-    environment:
-      PORT: "8080"
-      LOG_LEVEL: "info"
-      LOG_FORMAT: "json"
-      SCRAPE_TIMEOUT: "30s"
-      MAX_CONCURRENT_SCRAPES: "16"
-      MAX_SERIES_PER_REQUEST: "10000"
-      SHUTDOWN_GRACE: "10s"
-
-      # For local development with LocalStack, point the SDK at the
-      # local endpoint and use the LocalStack test credentials.
-      AWS_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "test"
-      AWS_SECRET_ACCESS_KEY: "test"
-      AWS_ENDPOINT_URL_CLOUDWATCH: "http://localstack:4566"
-
-      # In production on Cloud Run, omit the keys and set instead:
-      #   AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/CloudRunCloudWatchReader"
-      #   AWS_WEB_IDENTITY_TOKEN_AUDIENCE: "sts.amazonaws.com"   # default
-      # DEFAULT_ROLE_ARN may be used as a fallback when ?role_arn= is omitted.
-    depends_on:
-      - localstack
+    env_file:
+      - .env
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/exporter", "--healthcheck"]
@@ -36,22 +16,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
-    networks:
-      - default
-
-  # LocalStack provides a CloudWatch-compatible endpoint for local dev.
-  # Seed it after startup with awslocal:
-  #   awslocal cloudwatch put-metric-data --namespace AWS/EC2 \
-  #     --metric-name CPUUtilization --value 42 \
-  #     --dimensions InstanceId=i-0abc123
-  localstack:
-    image: localstack/localstack:latest
-    container_name: aws-metrics-localstack
-    ports:
-      - "4566:4566"
-    environment:
-      SERVICES: "cloudwatch"
-      DEBUG: "0"
     networks:
       - default
 
@@ -74,8 +38,30 @@ services:
     networks:
       - default
 
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: aws-metrics-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Local development only: anonymous admin, no login form.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - default
+
 volumes:
   prometheus-data:
+    driver: local
+  grafana-data:
     driver: local
 
 networks:

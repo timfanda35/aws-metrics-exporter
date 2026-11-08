@@ -23,7 +23,7 @@ aws-metrics-exporter/
 ├── go.mod                        # Go module 定義（Go 1.24）
 ├── CLAUDE.md                     # 本文件
 ├── Dockerfile                    # 容器映像（distroless/static, nonroot）
-├── docker-compose.yaml           # 開發環境（exporter + Prometheus + LocalStack）
+├── docker-compose.yaml           # 開發環境（exporter + Prometheus + Grafana）
 ├── cmd/
 │   └── server/
 │       ├── main.go               # 程式進入點：env config、logger、--healthcheck、graceful shutdown
@@ -40,7 +40,8 @@ aws-metrics-exporter/
 │   └── integration/
 │       └── integration_test.go   # //go:build integration 端對端測試
 └── config/
-    └── prometheus.yml            # Prometheus scrape 設定（開發用）
+    ├── prometheus.yml.example    # Prometheus scrape 設定範本：targets 為 exporter 位址，查詢參數放 params（複製為 prometheus.yml，已 gitignore）
+    └── grafana/                  # Grafana provisioning（datasource）+ 入門 dashboard
 ```
 
 ---
@@ -60,6 +61,7 @@ aws-metrics-exporter/
 - 呼叫 `cloud watch.GetMetricData`：
   - 每個 `MetricDataQuery` 都會設定 `AccountId`——這是 OAM 跨帳戶查詢的關鍵
   - `(MetricName × Statistic)` cross product，最多 500 queries / call，超過自動 chunk
+  - 有 `discover_dimension` 時先 `ListMetrics`（`IncludeLinkedAccounts` + `OwningAccount=account_id`，同樣最多 5 hop）取得維度組合，再為每組產生 query；超過 `MAX_SERIES_PER_REQUEST` 於呼叫 GetMetricData 前就回錯
   - 跟隨 `NextToken` 最多 5 hop
   - `ScanBy=TimestampDescending`，只取 latest datapoint
   - `TimeOffset`（來自 `?time_offset=`）把查詢視窗往回推：`EndTime = now - TimeOffset`，`StartTime = EndTime - Interval`，用來補償特定 namespace 已知的 CloudWatch ingest delay
@@ -70,7 +72,7 @@ aws-metrics-exporter/
 ### `internal/handler`
 - 實作 `GET /metrics` 與 `GET /healthz`
 - `/metrics`：
-  - 嚴格參數驗證（正則）：`account_id`（12 位數字）、`region`、`namespace`、`metric_name`（可重複）、`statistic`、`dimensions`（`Name=Value`）、`period`（1/5/10/30 或 60 的倍數）、`interval`（Go duration）、`time_offset`（Go duration，需 ≥ 0）、`role_arn`、`external_id`
+  - 嚴格參數驗證（正則）：`account_id`（12 位數字）、`region`、`namespace`、`metric_name`（可重複）、`statistic`、`dimensions`（`Name=Value`）、`discover_dimension`（單一維度名稱）、`period`（1/5/10/30 或 60 的倍數）、`interval`（Go duration）、`time_offset`（Go duration，需 ≥ 0）、`role_arn`、`external_id`
   - **不允許** `account_id` 重複——一個 request 只查一個帳戶；多帳戶 fan-out 由 Prometheus relabel_configs 處理
   - Non-blocking semaphore（`MAX_CONCURRENT_SCRAPES`）→ 滿載時 429 + `Retry-After: 1`
   - Per-request `context.WithTimeout(SCRAPE_TIMEOUT)`
@@ -97,9 +99,10 @@ aws-metrics-exporter/
 | `metric_name` | ✅ 可重複 | — | 一次可指定多個 metric。超過 500 自動 chunk。 |
 | `statistic` | ❌ 可重複 | `Average` | `Average`/`Sum`/`Minimum`/`Maximum`/`SampleCount`。 |
 | `dimensions` | ❌ 可重複 | — | `Name=Value`；套用到每個 metric_name。 |
+| `discover_dimension` | ❌ | — | 維度名稱（如 `InstanceId`）。exporter 先呼叫 `ListMetrics`，每個「維度名稱恰為此維度＋`dimensions` 所列」的組合回傳一條 series（忽略 ASG 等聚合 metric）。需 `cloudwatch:ListMetrics`，受 `MAX_SERIES_PER_REQUEST` 限制。 |
 | `period` | ❌ | `60` | CloudWatch period（秒）。 |
 | `interval` | ❌ | `5m` | 查詢時間視窗（Go duration）。 |
-| `time_offset` | ❌ | `0` | 把查詢視窗往回推移（Go duration，需 ≥ 0）：`EndTime = now - time_offset`。用於補償特定 namespace 的 CloudWatch ingest delay。 |
+| `time_offset` | ❌ | `0` | 把查詢視窗往回推移（Go duration，需 ≥ 0）：`EndTime = now - time_offset`。用於補償特定 namespace 的 CloudWatch ingest delay；在 Prometheus 以獨立 job 的 `params: time_offset` 設定（見 `config/prometheus.yml.example`）。 |
 | `role_arn` | ❌ | (`DEFAULT_ROLE_ARN`) | 觸發 per-request `sts:AssumeRole`。 |
 | `external_id` | ❌ | — | 僅 `role_arn` 一起用才有效。 |
 
@@ -143,8 +146,10 @@ Per-request `?role_arn=`（可選）會在 base credentials 上加一層 `stscre
 | `AWS_WEB_IDENTITY_TOKEN_AUDIENCE` | `sts.amazonaws.com` | GCP ID token audience |
 | `GCP_ID_TOKEN_URL` | metadata-server 預設 | 測試時可覆寫 |
 | `DEFAULT_ROLE_ARN` | — | `?role_arn=` 省略時的 fallback |
+| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | 覆寫 CloudWatch endpoint（如 VPC private endpoint）。OAM 跨帳戶查詢也走這個，不需另設 OAM endpoint。單一固定 URL，適合單 region；WIF 路徑目前不生效。 |
+| `AWS_ENDPOINT_URL_STS` | — | 覆寫 STS endpoint；僅在使用 `?role_arn=` / `DEFAULT_ROLE_ARN` 時需要。不要設全域 `AWS_ENDPOINT_URL`。 |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | CloudTrail session 名稱 |
-| `PRESERVE_CW_TIMESTAMP` | `false` | 設為 `true` 時在 sample 上保留 CloudWatch 原始 `TimestampMs`（舊行為）。**不要**和 `?time_offset=` 一起用。 |
+| `PRESERVE_CW_TIMESTAMP` | `false`（`.env.example` 設為 `true`） | 設為 `true` 時在 sample 上保留 CloudWatch 原始 `TimestampMs`，讓 Prometheus 與 AWS Console 的時間／數值對齊（搭配 `period=300`、`interval=15m`；見 README「Match the AWS console」）。只輸出最新資料點，timestamp 不會倒退；CloudWatch 事後修正同一區間數值時會被 Prometheus 以 duplicate 拒收。**不要**和 `?time_offset=` 一起用。 |
 
 ---
 
@@ -157,13 +162,12 @@ go test -tags=integration -count=1 -race ./...         # 含 integration
 go vet ./...
 ```
 
-### 啟動開發環境（含 LocalStack）
+### 啟動開發環境（exporter + Prometheus + Grafana，使用真實 AWS）
 ```bash
+cp .env.example .env                                    # 填入 IAM access key（已 gitignore）
+cp config/prometheus.yml.example config/prometheus.yml  # 編輯 params（account_id/region/namespace/metric_name，已 gitignore）
 docker compose up --build
-# Seed LocalStack:
-awslocal cloudwatch put-metric-data --namespace AWS/EC2 \
-  --metric-name CPUUtilization --value 42 \
-  --dimensions InstanceId=i-0abc123
+# Grafana: http://localhost:3000  Prometheus: http://localhost:9090/targets
 ```
 
 ### 本地執行（需 AWS credentials）

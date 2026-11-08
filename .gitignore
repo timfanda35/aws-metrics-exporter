@@ -25,6 +25,9 @@ vendor/
 .env.local
 *.env
 
+# Local Prometheus config (copy from config/prometheus.yml.example)
+config/prometheus.yml
+
 # IDE
 .idea/
 .vscode/
@@ -38,4 +41,5 @@ Thumbs.db
 # AWS credentials / secrets
 *.json
 !config/*.json
+!config/**/*.json
 .aws/

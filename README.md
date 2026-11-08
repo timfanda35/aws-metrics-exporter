@@ -25,8 +25,8 @@ Sibling projects in the same family:
 ## Prerequisites
 
 - Go 1.24+ (for building from source)
-- AWS credentials with `cloudwatch:GetMetricData` (and `oam:ListSinks` / source-account read in the OAM monitoring account)
-- Optional: Docker / Docker Compose for the dev stack (includes LocalStack)
+- AWS credentials with `cloudwatch:GetMetricData` (plus `cloudwatch:ListMetrics` for `discover_dimension`; and `oam:ListSinks` / source-account read in the OAM monitoring account)
+- Optional: Docker / Docker Compose for the dev stack (exporter + Prometheus + Grafana)
 
 ## Quick start — local
 
@@ -51,29 +51,23 @@ curl 'http://localhost:8080/healthz'
 curl 'http://localhost:8080/metrics?account_id=123456789012&region=us-east-1&namespace=AWS/EC2&metric_name=CPUUtilization'
 ```
 
-## Quick start — Docker Compose (with LocalStack)
+## Quick start — Docker Compose (exporter + Prometheus + Grafana)
+
+Uses real AWS: put your IAM access key in `.env` and your query `params` in `config/prometheus.yml`.
 
 ```bash
+cp .env.example .env                                     # fill AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+cp config/prometheus.yml.example config/prometheus.yml   # edit params (account_id, region, namespace, metric_name)
 docker compose up --build
 # Exporter:   http://localhost:8080
-# Prometheus: http://localhost:9090
-# LocalStack: http://localhost:4566
+# Prometheus: http://localhost:9090/targets
+# Grafana:    http://localhost:3000   (anonymous admin, local only; dashboard "CloudWatch via aws-metrics-exporter")
 ```
 
-Seed LocalStack with sample data (requires `awslocal`):
+Prometheus scrapes every 60s, so data appears in Grafana after about a minute. Check the exporter directly:
 
 ```bash
-awslocal cloudwatch put-metric-data \
-  --namespace AWS/EC2 \
-  --metric-name CPUUtilization \
-  --value 42 \
-  --dimensions InstanceId=i-0abc123
-```
-
-Then scrape:
-
-```bash
-curl 'http://localhost:8080/metrics?account_id=000000000000&region=us-east-1&namespace=AWS/EC2&metric_name=CPUUtilization'
+curl 'http://localhost:8080/metrics?account_id=<account>&region=us-east-1&namespace=AWS/EC2&metric_name=CPUUtilization'
 ```
 
 ## Quick start — Cloud Run with Workload Identity Federation
@@ -82,7 +76,7 @@ One-time AWS setup:
 
 1. Create an IAM OIDC provider for `https://accounts.google.com`.
 2. Create an IAM role (e.g. `CloudRunCloudWatchReader`) with a trust policy that allows `sts:AssumeRoleWithWebIdentity` when `accounts.google.com:sub` equals the Cloud Run service-account email and `accounts.google.com:aud` matches `sts.amazonaws.com`.
-3. Grant the role `cloudwatch:GetMetricData` (and `oam:ListSinks` if using OAM).
+3. Grant the role `cloudwatch:GetMetricData` (plus `cloudwatch:ListMetrics` if you use `discover_dimension`, and `oam:ListSinks` if using OAM).
 
 Deploy:
 
@@ -109,6 +103,7 @@ The exporter fetches a GCP ID token from the Cloud Run metadata server on each S
 | `metric_name` | yes (repeatable) | — | One CloudWatch metric per occurrence. Chunked at 500 per call. |
 | `statistic` | no (repeatable) | `Average` | One of `Average`, `Sum`, `Minimum`, `Maximum`, `SampleCount`. Emitted as `statistic` label. |
 | `dimensions` | no (repeatable) | — | `Name=Value`; applied to every `metric_name`. |
+| `discover_dimension` | no | — | Dimension name (e.g. `InstanceId`). The exporter calls `ListMetrics` and returns one series per discovered dimension set whose names are exactly this dimension plus any `dimensions` given (aggregates like `AutoScalingGroupName` are ignored). Needs `cloudwatch:ListMetrics`; capped by `MAX_SERIES_PER_REQUEST`. |
 | `period` | no | `60` | CloudWatch aggregation period (seconds). Must be 1/5/10/30 or a multiple of 60. |
 | `interval` | no | `5m` | Query window (Go duration). |
 | `time_offset` | no | `0` | Shift the query window back (Go duration, must be ≥ 0): `EndTime = now - time_offset`. Use when a namespace's CloudWatch ingest delay exceeds the default window. |
@@ -169,7 +164,9 @@ Liveness only. Returns `200 OK` with `{"status":"ok"}`. Does not call AWS — so
 | `AWS_WEB_IDENTITY_TOKEN_AUDIENCE` | `sts.amazonaws.com` | Audience for the GCP ID token. |
 | `GCP_ID_TOKEN_URL` | metadata-server default | Override for tests. |
 | `DEFAULT_ROLE_ARN` | — | Fallback `role_arn` when query param omits it. |
-| `PRESERVE_CW_TIMESTAMP` | `false` | When `true`, emits CloudWatch's own datapoint timestamp as `TimestampMs` instead of leaving it unset. Don't combine with `?time_offset=` — the offset would push the emitted timestamp even further into the past, reintroducing the rejection issue this flag's default avoids. |
+| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | Override the CloudWatch endpoint (e.g. a VPC private endpoint). This is the only endpoint needed for OAM cross-account reads. Single fixed URL, so single-region use. Not honored on the WIF path. |
+| `AWS_ENDPOINT_URL_STS` | — | Override the STS endpoint; only matters with `?role_arn=` / `DEFAULT_ROLE_ARN`. Don't set the global `AWS_ENDPOINT_URL`. |
+| `PRESERVE_CW_TIMESTAMP` | `false` (`.env.example` sets `true`) | When `true`, emits CloudWatch's own datapoint timestamp as `TimestampMs` instead of leaving it unset. Don't combine with `?time_offset=` — the offset would push the emitted timestamp even further into the past, reintroducing the rejection issue this flag's default avoids. |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | Labels STS sessions in CloudTrail. |
 
 CLI flag: `--healthcheck` does a loopback `GET /healthz` and exits 0/1. Used by Dockerfile / compose `HEALTHCHECK`.
@@ -185,44 +182,38 @@ Optional per-request `sts:AssumeRole` wrap via `?role_arn=` (cached per ARN). Pa
 
 ## Prometheus scrape config
 
-Multi-target: one Prometheus job, one `static_configs.targets` entry per `(account, region, namespace, metric)` tuple, separated by `;`. See [config/prometheus.yml](config/prometheus.yml) for the full pattern:
+Prometheus: `targets` is just the exporter address and every query argument goes in the job's `params` (each list becomes repeated query args). One request queries one account / region / namespace, so use **one job per `(account, region, namespace)`** with a `metric_name` list. See [config/prometheus.yml.example](config/prometheus.yml.example):
 
 ```yaml
 scrape_configs:
-  - job_name: aws-cloudwatch
+  - job_name: aws-ec2
     metrics_path: /metrics
     static_configs:
-      - targets:
-          - "123456789012;us-east-1;AWS/EC2;CPUUtilization"
-          - "987654321098;us-west-2;AWS/RDS;CPUUtilization"
-    relabel_configs:
-      - source_labels: [__address__]
-        regex: '([^;]+);([^;]+);([^;]+);(.+)'
-        target_label: __param_account_id
-        replacement: $1
-      - source_labels: [__address__]
-        regex: '([^;]+);([^;]+);([^;]+);(.+)'
-        target_label: __param_region
-        replacement: $2
-      - source_labels: [__address__]
-        regex: '([^;]+);([^;]+);([^;]+);(.+)'
-        target_label: __param_namespace
-        replacement: $3
-      - source_labels: [__address__]
-        regex: '([^;]+);([^;]+);([^;]+);(.+)'
-        target_label: __param_metric_name
-        replacement: $4
-      - target_label: __address__
-        replacement: exporter:8080
-```
-
-For dimensions (e.g. `InstanceId`), add them via `params:` on the job:
-
-```yaml
+      - targets: ["exporter:8080"]
+        labels:
+          source: aws-cloudwatch
     params:
-      dimensions: ["InstanceId=i-0abc123"]
-      statistic: ["Average", "Maximum"]
+      account_id: ["123456789012"]
+      region: ["us-east-1"]
+      namespace: ["AWS/EC2"]
+      metric_name: ["CPUUtilization", "NetworkIn"]
+      statistic: ["Average", "Maximum"]          # optional
+      discover_dimension: ["InstanceId"]         # optional: one series per instance (ListMetrics)
+      # dimensions: ["InstanceId=i-0abc123"]      # optional: pin one instance instead
+      # time_offset: ["10m"]                      # optional, for namespaces with CloudWatch ingest delay
 ```
+
+### Match the AWS console
+
+The exporter's default is to let Prometheus stamp scrape time (`PRESERVE_CW_TIMESTAMP=false`), so values appear a few minutes after CloudWatch's own time and repeat between datapoints. To store each sample at the same time and value as the AWS console, `.env.example` and `config/prometheus.yml.example` use:
+
+- `PRESERVE_CW_TIMESTAMP=true` — samples carry CloudWatch's datapoint timestamp (start of the bucket, as in the console). Only the newest datapoint is emitted per scrape, so a series' timestamps never go backwards and an unchanged datapoint re-sent on the next scrape is ignored by Prometheus.
+- `period: ["300"]` for EC2 basic monitoring (one datapoint per 5 min; use `60` with detailed monitoring) and `interval: ["15m"]` so the newest published bucket is always inside the query window.
+- One job per `statistic`: `Average` for `CPUUtilization`, `Sum` for `NetworkIn` (bytes per period, as the console shows).
+- Keep `scrape_interval` at or below the period; a longer interval skips buckets.
+- Grafana panels wrap queries in `last_over_time(...[10m])`, so a series with 5-minute spacing stays continuous under Prometheus's default 5m lookback.
+
+Limits: a datapoint is published roughly 1–5 minutes after its bucket ends, so the newest point still lags real time by about 5–10 minutes (in the AWS console too). If CloudWatch later revises a bucket you already scraped, Prometheus rejects the same timestamp with a different value, so the stored value can differ slightly from the console's final one (watch `prometheus_target_scrapes_sample_duplicate_timestamp_total`, `..._out_of_order_total`, `..._out_of_bounds_total`). Avoid combining with `time_offset`, which makes timestamps older.
 
 ## Development
 
