@@ -95,6 +95,15 @@ type QueryParams struct {
 	// labels.
 	Dimensions []Dimension
 
+	// DiscoverDimension, when set (e.g. "InstanceId"), makes the
+	// collector call ListMetrics first and query one series per
+	// discovered dimension set whose dimension names are exactly
+	// {DiscoverDimension} plus the names in Dimensions. Aggregate
+	// metrics (e.g. AutoScalingGroupName) and metrics with additional
+	// dimensions are ignored. Dimensions then act as extra fixed
+	// filters. Empty (default) queries only the Dimensions given.
+	DiscoverDimension string
+
 	// Period is the CloudWatch aggregation period in seconds. Zero
 	// defaults to 60.
 	Period int32
@@ -211,7 +220,14 @@ func (c *CloudWatchCollector) Collect(ctx context.Context, params QueryParams) (
 		interval = defaultInterval
 	}
 
-	queries, idToCtx := buildMetricDataQueries(params, stats, period)
+	targets, err := c.resolveTargets(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	queries, idToCtx := buildMetricDataQueries(params, targets, stats, period)
+	if params.DiscoverDimension != "" && len(queries) > c.maxSeries {
+		return nil, fmt.Errorf("%w: discovered %d queries, limit=%d", ErrMaxSeriesExceeded, len(queries), c.maxSeries)
+	}
 
 	now := c.now()
 	offset := params.TimeOffset
@@ -256,30 +272,120 @@ func (c *CloudWatchCollector) Collect(ctx context.Context, params QueryParams) (
 type queryContext struct {
 	metricName string
 	statistic  string
+	dims       []Dimension
 }
 
-// buildMetricDataQueries forms the (MetricName x Statistic) cross
-// product. Each query gets:
+// target is one metric identity to query: a metric name plus the exact
+// dimension set CloudWatch stores it under.
+type target struct {
+	metricName string
+	dims       []Dimension
+}
+
+// resolveTargets returns the metric identities to query. Without
+// DiscoverDimension it is the MetricNames x the request's Dimensions;
+// with it, ListMetrics supplies the dimension sets.
+func (c *CloudWatchCollector) resolveTargets(ctx context.Context, params QueryParams) ([]target, error) {
+	if params.DiscoverDimension == "" {
+		out := make([]target, 0, len(params.MetricNames))
+		for _, name := range params.MetricNames {
+			out = append(out, target{metricName: name, dims: params.Dimensions})
+		}
+		return out, nil
+	}
+
+	wantNames := map[string]struct{}{params.DiscoverDimension: {}}
+	filters := []cwtypes.DimensionFilter{{Name: aws.String(params.DiscoverDimension)}}
+	for _, d := range params.Dimensions {
+		wantNames[d.Name] = struct{}{}
+		filters = append(filters, cwtypes.DimensionFilter{Name: aws.String(d.Name), Value: aws.String(d.Value)})
+	}
+
+	var out []target
+	for _, name := range params.MetricNames {
+		var found []target
+		nextToken := (*string)(nil)
+		for hop := 0; hop <= maxPaginationTokens; hop++ {
+			res, err := c.client.ListMetrics(ctx, &cloudwatch.ListMetricsInput{
+				Namespace:             aws.String(params.Namespace),
+				MetricName:            aws.String(name),
+				Dimensions:            filters,
+				IncludeLinkedAccounts: aws.Bool(true),
+				OwningAccount:         aws.String(params.AccountID),
+				NextToken:             nextToken,
+			})
+			if err != nil {
+				return nil, err
+			}
+			for _, m := range res.Metrics {
+				if !hasExactDimensionNames(m.Dimensions, wantNames) {
+					continue
+				}
+				dims := make([]Dimension, 0, len(m.Dimensions))
+				for _, d := range m.Dimensions {
+					dims = append(dims, Dimension{Name: aws.ToString(d.Name), Value: aws.ToString(d.Value)})
+				}
+				found = append(found, target{metricName: name, dims: dims})
+			}
+			if res.NextToken == nil || *res.NextToken == "" {
+				break
+			}
+			nextToken = res.NextToken
+		}
+		// Deterministic order so query IDs are stable across scrapes.
+		sort.Slice(found, func(i, j int) bool { return dimsKey(found[i].dims) < dimsKey(found[j].dims) })
+		out = append(out, found...)
+	}
+	return out, nil
+}
+
+// hasExactDimensionNames reports whether dims has exactly the names in
+// want (no more, no fewer, no duplicates).
+func hasExactDimensionNames(dims []cwtypes.Dimension, want map[string]struct{}) bool {
+	if len(dims) != len(want) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(dims))
+	for _, d := range dims {
+		n := aws.ToString(d.Name)
+		if _, ok := want[n]; !ok {
+			return false
+		}
+		seen[n] = struct{}{}
+	}
+	return len(seen) == len(want)
+}
+
+func dimsKey(dims []Dimension) string {
+	parts := make([]string, 0, len(dims))
+	for _, d := range dims {
+		parts = append(parts, d.Name+"="+d.Value)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\x00")
+}
+
+// buildMetricDataQueries forms the (target x Statistic) cross product.
+// Each query gets:
 //
 //   - Id = "qN" (matches the CW-required pattern ^[a-z][a-zA-Z0-9_]*$),
 //   - AccountId = params.AccountID (the OAM bit, always set),
 //   - MetricStat with namespace/metric/dimensions/period/stat.
 //
-// The returned id→context map lets the converter recover (metric, stat)
-// for each result row.
-func buildMetricDataQueries(params QueryParams, stats []string, period int32) ([]cwtypes.MetricDataQuery, map[string]queryContext) {
-	dims := make([]cwtypes.Dimension, 0, len(params.Dimensions))
-	for _, d := range params.Dimensions {
-		dims = append(dims, cwtypes.Dimension{
-			Name:  aws.String(d.Name),
-			Value: aws.String(d.Value),
-		})
-	}
-
-	queries := make([]cwtypes.MetricDataQuery, 0, len(params.MetricNames)*len(stats))
-	ctxByID := make(map[string]queryContext, len(params.MetricNames)*len(stats))
+// The returned id→context map lets the converter recover
+// (metric, stat, dimensions) for each result row.
+func buildMetricDataQueries(params QueryParams, targets []target, stats []string, period int32) ([]cwtypes.MetricDataQuery, map[string]queryContext) {
+	queries := make([]cwtypes.MetricDataQuery, 0, len(targets)*len(stats))
+	ctxByID := make(map[string]queryContext, len(targets)*len(stats))
 	i := 0
-	for _, name := range params.MetricNames {
+	for _, t := range targets {
+		dims := make([]cwtypes.Dimension, 0, len(t.dims))
+		for _, d := range t.dims {
+			dims = append(dims, cwtypes.Dimension{
+				Name:  aws.String(d.Name),
+				Value: aws.String(d.Value),
+			})
+		}
 		for _, stat := range stats {
 			id := fmt.Sprintf("%s%d", identifierPrefix, i)
 			i++
@@ -289,7 +395,7 @@ func buildMetricDataQueries(params QueryParams, stats []string, period int32) ([
 				MetricStat: &cwtypes.MetricStat{
 					Metric: &cwtypes.Metric{
 						Namespace:  aws.String(params.Namespace),
-						MetricName: aws.String(name),
+						MetricName: aws.String(t.metricName),
 						Dimensions: dims,
 					},
 					Period: aws.Int32(period),
@@ -297,7 +403,7 @@ func buildMetricDataQueries(params QueryParams, stats []string, period int32) ([
 				},
 				ReturnData: aws.Bool(true),
 			})
-			ctxByID[id] = queryContext{metricName: name, statistic: stat}
+			ctxByID[id] = queryContext{metricName: t.metricName, statistic: stat, dims: t.dims}
 		}
 	}
 	return queries, ctxByID
@@ -389,7 +495,7 @@ func convertToFamilies(params QueryParams, results []cwtypes.MetricDataResult, c
 // dimension sorted by sanitised name. Reserved-name collisions are
 // avoided by prefixing the dimension label with "dim_".
 func buildLabels(params QueryParams, qc queryContext, r cwtypes.MetricDataResult) []*dto.LabelPair {
-	out := make([]*dto.LabelPair, 0, 4+len(params.Dimensions))
+	out := make([]*dto.LabelPair, 0, 4+len(qc.dims))
 	out = append(out,
 		&dto.LabelPair{Name: proto.String("account_id"), Value: proto.String(params.AccountID)},
 		&dto.LabelPair{Name: proto.String("region"), Value: proto.String(params.Region)},
@@ -406,8 +512,8 @@ func buildLabels(params QueryParams, qc queryContext, r cwtypes.MetricDataResult
 	}
 
 	// Sort dimensions by sanitised name for deterministic output.
-	dims := make([]Dimension, len(params.Dimensions))
-	copy(dims, params.Dimensions)
+	dims := make([]Dimension, len(qc.dims))
+	copy(dims, qc.dims)
 	sort.Slice(dims, func(i, j int) bool {
 		return promLabelName(dims[i].Name) < promLabelName(dims[j].Name)
 	})

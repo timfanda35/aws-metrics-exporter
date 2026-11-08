@@ -16,6 +16,10 @@ import (
 type CloudWatchAPI interface {
 	// GetMetricData mirrors the SDK's same-named method exactly.
 	GetMetricData(ctx context.Context, in *cloudwatch.GetMetricDataInput, opts ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricDataOutput, error)
+
+	// ListMetrics mirrors the SDK's same-named method exactly. It is only
+	// called when a request sets QueryParams.DiscoverDimension.
+	ListMetrics(ctx context.Context, in *cloudwatch.ListMetricsInput, opts ...func(*cloudwatch.Options)) (*cloudwatch.ListMetricsOutput, error)
 }
 
 // NewCloudWatchAdapter returns a [CloudWatchAPI] backed by the provided

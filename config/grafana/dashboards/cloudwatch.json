@@ -1,0 +1,324 @@
+{
+  "uid": "aws-cloudwatch",
+  "title": "CloudWatch via aws-metrics-exporter",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "tags": [
+    "cloudwatch"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "DS",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      },
+      {
+        "name": "metric",
+        "label": "Metric",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS}"
+        },
+        "query": {
+          "query": "label_values({source=\"aws-cloudwatch\"}, __name__)",
+          "refId": "vmetric",
+          "qryType": 1
+        },
+        "definition": "label_values({source=\"aws-cloudwatch\"}, __name__)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false
+      },
+      {
+        "name": "account",
+        "label": "Account",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS}"
+        },
+        "query": {
+          "query": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, account_id)",
+          "refId": "vaccount",
+          "qryType": 1
+        },
+        "definition": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, account_id)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "statistic",
+        "label": "Statistic",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS}"
+        },
+        "query": {
+          "query": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, statistic)",
+          "refId": "vstatistic",
+          "qryType": 1
+        },
+        "definition": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, statistic)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Configured metrics (config/prometheus.yml)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "AWS/EC2 CPUUtilization (%)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "expr": "aws_ec2_cpuutilization{account_id=~\"$account\", statistic=~\"$statistic\"}",
+          "legendFormat": "{{account_id}} {{statistic}} {{InstanceId}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "AWS/EC2 NetworkIn (bytes)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "expr": "aws_ec2_networkin{account_id=~\"$account\", statistic=~\"$statistic\"}",
+          "legendFormat": "{{account_id}} {{statistic}} {{InstanceId}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "Explorer (pick any metric)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "$metric",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "expr": "{source=\"aws-cloudwatch\", __name__=\"$metric\", account_id=~\"$account\", statistic=~\"$statistic\"}",
+          "legendFormat": "{{account_id}} {{statistic}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Latest values",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "{source=\"aws-cloudwatch\", __name__=\"$metric\", account_id=~\"$account\", statistic=~\"$statistic\"}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "monitor": true,
+              "source": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Scrape up",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "expr": "up{source=\"aws-cloudwatch\"}",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Scrape duration (s)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 28,
+        "w": 16,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "expr": "scrape_duration_seconds{source=\"aws-cloudwatch\"}",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    }
+  ]
+}

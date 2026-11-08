@@ -1,0 +1,66 @@
+# Copy to config/prometheus.yml (gitignored) and edit the params below:
+#   cp config/prometheus.yml.example config/prometheus.yml
+#
+# `targets` is only the exporter address; every query argument lives in
+# `params` (Prometheus turns each list into repeated query args, e.g.
+# ?account_id=...&metric_name=CPUUtilization&metric_name=NetworkIn).
+#
+# One exporter request queries ONE account / region / namespace, so add one
+# job per (account, region, namespace); `metric_name`, `statistic` and
+# `dimensions` may list several values. With OAM, every listed account must be
+# linked to the monitoring account this exporter runs in (or whose role it
+# carries).
+global:
+  scrape_interval: 60s
+  scrape_timeout: 25s
+  evaluation_interval: 60s
+  external_labels:
+    monitor: aws-metrics-exporter
+
+scrape_configs:
+  # EDIT ME: one job per (account, region, namespace).
+  - job_name: aws-ec2
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["exporter:8080"]
+        labels:
+          source: aws-cloudwatch
+    params:
+      account_id: ["000000000000"]
+      region: ["us-east-1"]
+      namespace: ["AWS/EC2"]
+      metric_name: ["CPUUtilization", "NetworkIn"]
+      statistic: ["Average"]
+      # List every instance (one series per InstanceId) via ListMetrics.
+      # Needs cloudwatch:ListMetrics. Use `dimensions` instead to pin one.
+      discover_dimension: ["InstanceId"]
+      # dimensions: ["InstanceId=i-0abc123"]
+      # period: ["60"]
+      # interval: ["5m"]
+      # role_arn: ["arn:aws:iam::000000000000:role/CloudWatchReader"]
+      # external_id: ["..."]
+
+  # Namespaces with a known CloudWatch ingest delay: shift the query window
+  # back with time_offset so the "latest" datapoint actually exists yet.
+  # Do NOT combine with PRESERVE_CW_TIMESTAMP=true (the offset makes emitted
+  # timestamps older and brings back out-of-bounds/duplicate-sample rejection).
+  # - job_name: aws-billing
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["exporter:8080"]
+  #       labels:
+  #         source: aws-cloudwatch
+  #   params:
+  #     account_id: ["000000000000"]
+  #     region: ["us-east-1"]
+  #     namespace: ["AWS/Billing"]
+  #     metric_name: ["EstimatedCharges"]
+  #     statistic: ["Maximum"]
+  #     time_offset: ["10m"]
+
+  # Optional: scrape Prometheus's own metrics for self-monitoring.
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - "localhost:9090"

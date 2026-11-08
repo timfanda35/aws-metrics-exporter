@@ -40,6 +40,7 @@ const nonStandardClientClosed = 499
 // Validation patterns.
 var (
 	accountIDPattern  = regexp.MustCompile(`^\d{12}$`)
+	dimNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,255}$`)
 	regionPattern     = regexp.MustCompile(`^[a-z]{2,3}-[a-z]+-\d+$`)
 	roleARNPattern    = regexp.MustCompile(`^arn:(aws|aws-cn|aws-us-gov):iam::\d{12}:role/.+`)
 	validStatistics   = map[string]struct{}{"Average": {}, "Sum": {}, "Minimum": {}, "Maximum": {}, "SampleCount": {}}
@@ -119,6 +120,7 @@ type requestParams struct {
 	metricNames []string
 	statistics  []string
 	dimensions  []collector.Dimension
+	discoverDim string
 	period      int32
 	interval    time.Duration
 	timeOffset  time.Duration
@@ -182,6 +184,18 @@ func parseRequest(r *http.Request, limits Limits) (*requestParams, string, int) 
 		return nil, errMsg, http.StatusBadRequest
 	}
 
+	discoverVals := q["discover_dimension"]
+	if len(discoverVals) > 1 {
+		return nil, "multiple discover_dimension values are not supported", http.StatusBadRequest
+	}
+	discoverDim := ""
+	if len(discoverVals) == 1 {
+		discoverDim = discoverVals[0]
+		if !dimNamePattern.MatchString(discoverDim) {
+			return nil, fmt.Sprintf("invalid discover_dimension %q: must be a CloudWatch dimension name, e.g. InstanceId", discoverDim), http.StatusBadRequest
+		}
+	}
+
 	period := int32(60)
 	if v := q.Get("period"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -232,6 +246,7 @@ func parseRequest(r *http.Request, limits Limits) (*requestParams, string, int) 
 		metricNames: metricNames,
 		statistics:  statistics,
 		dimensions:  dims,
+		discoverDim: discoverDim,
 		period:      period,
 		interval:    interval,
 		timeOffset:  timeOffset,
@@ -295,6 +310,7 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Int("metric_count", len(params.metricNames)),
 		slog.Int("statistic_count", len(params.statistics)),
 		slog.Bool("role_arn_set", params.roleARN != ""),
+		slog.String("discover_dimension", params.discoverDim),
 	}
 
 	c, err := h.collectorForKey(ctx, params.region, params.roleARN, params.externalID)
@@ -306,15 +322,16 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	awsStart := h.now()
 	families, err := c.Collect(ctx, collector.QueryParams{
-		AccountID:   params.accountID,
-		Region:      params.region,
-		Namespace:   params.namespace,
-		MetricNames: params.metricNames,
-		Statistics:  params.statistics,
-		Dimensions:  params.dimensions,
-		Period:      params.period,
-		Interval:    params.interval,
-		TimeOffset:  params.timeOffset,
+		AccountID:         params.accountID,
+		Region:            params.region,
+		Namespace:         params.namespace,
+		MetricNames:       params.metricNames,
+		Statistics:        params.statistics,
+		Dimensions:        params.dimensions,
+		DiscoverDimension: params.discoverDim,
+		Period:            params.period,
+		Interval:          params.interval,
+		TimeOffset:        params.timeOffset,
 	})
 	awsLatency := elapsedMs(h.now(), awsStart)
 

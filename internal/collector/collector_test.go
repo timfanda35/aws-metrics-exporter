@@ -17,6 +17,17 @@ import (
 type stubCloudWatch struct {
 	calls []*cloudwatch.GetMetricDataInput
 	fn    func(in *cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error)
+
+	listCalls []*cloudwatch.ListMetricsInput
+	listFn    func(in *cloudwatch.ListMetricsInput) (*cloudwatch.ListMetricsOutput, error)
+}
+
+func (s *stubCloudWatch) ListMetrics(_ context.Context, in *cloudwatch.ListMetricsInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.ListMetricsOutput, error) {
+	s.listCalls = append(s.listCalls, in)
+	if s.listFn == nil {
+		return &cloudwatch.ListMetricsOutput{}, nil
+	}
+	return s.listFn(in)
 }
 
 func (s *stubCloudWatch) GetMetricData(_ context.Context, in *cloudwatch.GetMetricDataInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricDataOutput, error) {
@@ -384,4 +395,180 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func cwDims(kv ...string) []cwtypes.Dimension {
+	var out []cwtypes.Dimension
+	for i := 0; i+1 < len(kv); i += 2 {
+		out = append(out, cwtypes.Dimension{Name: aws.String(kv[i]), Value: aws.String(kv[i+1])})
+	}
+	return out
+}
+
+func TestCollect_DiscoverDimension(t *testing.T) {
+	listOut := &cloudwatch.ListMetricsOutput{Metrics: []cwtypes.Metric{
+		{Dimensions: cwDims("InstanceId", "i-b")},
+		{Dimensions: cwDims("AutoScalingGroupName", "asg")},
+		{Dimensions: cwDims("InstanceId", "i-a")},
+		{Dimensions: cwDims("InstanceId", "i-c", "ImageId", "ami-1")},
+	}}
+	var sent []cwtypes.MetricDataQuery
+	stub := &stubCloudWatch{
+		listFn: func(*cloudwatch.ListMetricsInput) (*cloudwatch.ListMetricsOutput, error) { return listOut, nil },
+		fn: func(in *cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error) {
+			sent = append(sent, in.MetricDataQueries...)
+			var res []cwtypes.MetricDataResult
+			for _, q := range in.MetricDataQueries {
+				res = append(res, cwtypes.MetricDataResult{Id: q.Id, Values: []float64{1}})
+			}
+			return &cloudwatch.GetMetricDataOutput{MetricDataResults: res}, nil
+		},
+	}
+	c := NewCloudWatchCollector(stub, Options{})
+
+	fams, err := c.Collect(context.Background(), QueryParams{
+		AccountID: "123456789012", Region: "us-west-2", Namespace: "AWS/EC2",
+		MetricNames: []string{"CPUUtilization"}, DiscoverDimension: "InstanceId",
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	if len(stub.listCalls) != 1 {
+		t.Fatalf("ListMetrics calls = %d, want 1", len(stub.listCalls))
+	}
+	lc := stub.listCalls[0]
+	if aws.ToString(lc.OwningAccount) != "123456789012" || !aws.ToBool(lc.IncludeLinkedAccounts) {
+		t.Errorf("ListMetrics OwningAccount/IncludeLinkedAccounts = %v/%v", aws.ToString(lc.OwningAccount), aws.ToBool(lc.IncludeLinkedAccounts))
+	}
+	if len(sent) != 2 {
+		t.Fatalf("queries = %d, want 2 (only exact InstanceId sets)", len(sent))
+	}
+	// Sorted by dimension value: i-a then i-b.
+	if got := aws.ToString(sent[0].MetricStat.Metric.Dimensions[0].Value); got != "i-a" {
+		t.Errorf("first query instance = %q, want i-a", got)
+	}
+	if len(fams) != 1 || len(fams[0].Metric) != 2 {
+		t.Fatalf("families/series = %d/%d, want 1/2", len(fams), len(fams[0].Metric))
+	}
+	var got []string
+	for _, m := range fams[0].Metric {
+		for _, l := range m.Label {
+			if l.GetName() == "InstanceId" {
+				got = append(got, l.GetValue())
+			}
+		}
+	}
+	if len(got) != 2 || got[0] != "i-a" || got[1] != "i-b" {
+		t.Errorf("InstanceId labels = %v, want [i-a i-b]", got)
+	}
+}
+
+func TestCollect_DiscoverDimension_ExtraFixedDimension(t *testing.T) {
+	stub := &stubCloudWatch{
+		listFn: func(*cloudwatch.ListMetricsInput) (*cloudwatch.ListMetricsOutput, error) {
+			return &cloudwatch.ListMetricsOutput{Metrics: []cwtypes.Metric{
+				{Dimensions: cwDims("InstanceId", "i-a", "ImageId", "ami-1")},
+				{Dimensions: cwDims("InstanceId", "i-b")},
+			}}, nil
+		},
+		fn: func(*cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error) {
+			return &cloudwatch.GetMetricDataOutput{}, nil
+		},
+	}
+	c := NewCloudWatchCollector(stub, Options{})
+	_, err := c.Collect(context.Background(), QueryParams{
+		AccountID: "123456789012", Region: "us-west-2", Namespace: "AWS/EC2",
+		MetricNames: []string{"CPUUtilization"}, DiscoverDimension: "InstanceId",
+		Dimensions: []Dimension{{Name: "ImageId", Value: "ami-1"}},
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if n := len(stub.calls[0].MetricDataQueries); n != 1 {
+		t.Errorf("queries = %d, want 1 (InstanceId+ImageId only)", n)
+	}
+	if f := stub.listCalls[0].Dimensions; len(f) != 2 {
+		t.Errorf("ListMetrics dimension filters = %d, want 2", len(f))
+	}
+}
+
+func TestCollect_DiscoverDimension_Pagination(t *testing.T) {
+	page := 0
+	stub := &stubCloudWatch{
+		listFn: func(in *cloudwatch.ListMetricsInput) (*cloudwatch.ListMetricsOutput, error) {
+			page++
+			if page == 1 {
+				return &cloudwatch.ListMetricsOutput{
+					Metrics:   []cwtypes.Metric{{Dimensions: cwDims("InstanceId", "i-a")}},
+					NextToken: aws.String("t"),
+				}, nil
+			}
+			if aws.ToString(in.NextToken) != "t" {
+				t.Errorf("second page NextToken = %q, want t", aws.ToString(in.NextToken))
+			}
+			return &cloudwatch.ListMetricsOutput{Metrics: []cwtypes.Metric{{Dimensions: cwDims("InstanceId", "i-b")}}}, nil
+		},
+		fn: func(*cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error) {
+			return &cloudwatch.GetMetricDataOutput{}, nil
+		},
+	}
+	c := NewCloudWatchCollector(stub, Options{})
+	_, err := c.Collect(context.Background(), QueryParams{
+		AccountID: "123456789012", Region: "us-west-2", Namespace: "AWS/EC2",
+		MetricNames: []string{"CPUUtilization"}, DiscoverDimension: "InstanceId",
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(stub.listCalls) != 2 || len(stub.calls[0].MetricDataQueries) != 2 {
+		t.Errorf("listCalls=%d queries=%d, want 2/2", len(stub.listCalls), len(stub.calls[0].MetricDataQueries))
+	}
+}
+
+func TestCollect_DiscoverDimension_ErrorsAndLimits(t *testing.T) {
+	boom := errors.New("boom")
+	c := NewCloudWatchCollector(&stubCloudWatch{
+		listFn: func(*cloudwatch.ListMetricsInput) (*cloudwatch.ListMetricsOutput, error) { return nil, boom },
+	}, Options{})
+	_, err := c.Collect(context.Background(), QueryParams{
+		AccountID: "123456789012", Region: "r", Namespace: "AWS/EC2",
+		MetricNames: []string{"CPUUtilization"}, DiscoverDimension: "InstanceId",
+	})
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want ListMetrics error propagated", err)
+	}
+
+	stub := &stubCloudWatch{
+		listFn: func(*cloudwatch.ListMetricsInput) (*cloudwatch.ListMetricsOutput, error) {
+			return &cloudwatch.ListMetricsOutput{Metrics: []cwtypes.Metric{
+				{Dimensions: cwDims("InstanceId", "i-a")},
+				{Dimensions: cwDims("InstanceId", "i-b")},
+			}}, nil
+		},
+	}
+	c = NewCloudWatchCollector(stub, Options{MaxSeries: 1})
+	_, err = c.Collect(context.Background(), QueryParams{
+		AccountID: "123456789012", Region: "r", Namespace: "AWS/EC2",
+		MetricNames: []string{"CPUUtilization"}, DiscoverDimension: "InstanceId",
+	})
+	if !errors.Is(err, ErrMaxSeriesExceeded) {
+		t.Errorf("err = %v, want ErrMaxSeriesExceeded", err)
+	}
+	if len(stub.calls) != 0 {
+		t.Errorf("GetMetricData called %d times, want 0 (early limit)", len(stub.calls))
+	}
+}
+
+func TestCollect_NoDiscoverySkipsListMetrics(t *testing.T) {
+	stub := &stubCloudWatch{fn: func(*cloudwatch.GetMetricDataInput) (*cloudwatch.GetMetricDataOutput, error) {
+		return &cloudwatch.GetMetricDataOutput{}, nil
+	}}
+	c := NewCloudWatchCollector(stub, Options{})
+	_, _ = c.Collect(context.Background(), QueryParams{
+		AccountID: "123456789012", Region: "r", Namespace: "AWS/EC2", MetricNames: []string{"CPUUtilization"},
+	})
+	if len(stub.listCalls) != 0 {
+		t.Errorf("ListMetrics called %d times, want 0", len(stub.listCalls))
+	}
 }

@@ -244,3 +244,68 @@ func TestHandleHealthz(t *testing.T) {
 		t.Fatalf("body = %q", w.Body.String())
 	}
 }
+
+// TestServeHTTP_PrometheusParamsForm pins the query string Prometheus builds
+// from a scrape job's `params:` lists: repeated metric_name / statistic /
+// dimensions values must all reach the collector.
+func TestServeHTTP_PrometheusParamsForm(t *testing.T) {
+	fake := &fakeCollector{families: []*dto.MetricFamily{}}
+	h := NewMetricsHandler(factoryReturning(fake), Limits{}, discardLogger())
+
+	url := "/metrics?account_id=123456789012&region=us-east-1&namespace=AWS/EC2" +
+		"&metric_name=CPUUtilization&metric_name=NetworkIn" +
+		"&statistic=Average&statistic=Maximum" +
+		"&dimensions=InstanceId%3Di-0abc&time_offset=10m"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, url, nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	got := fake.gotParams
+	if want := []string{"CPUUtilization", "NetworkIn"}; !equalStrings(got.MetricNames, want) {
+		t.Errorf("MetricNames = %v, want %v", got.MetricNames, want)
+	}
+	if want := []string{"Average", "Maximum"}; !equalStrings(got.Statistics, want) {
+		t.Errorf("Statistics = %v, want %v", got.Statistics, want)
+	}
+	if len(got.Dimensions) != 1 || got.Dimensions[0].Name != "InstanceId" || got.Dimensions[0].Value != "i-0abc" {
+		t.Errorf("Dimensions = %+v, want [{InstanceId i-0abc}]", got.Dimensions)
+	}
+	if got.TimeOffset != 10*time.Minute {
+		t.Errorf("TimeOffset = %v, want 10m", got.TimeOffset)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestServeHTTP_DiscoverDimension(t *testing.T) {
+	fake := &fakeCollector{families: []*dto.MetricFamily{}}
+	h := NewMetricsHandler(factoryReturning(fake), Limits{}, discardLogger())
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, validQuery()+"&discover_dimension=InstanceId", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if fake.gotParams.DiscoverDimension != "InstanceId" {
+		t.Errorf("DiscoverDimension = %q, want InstanceId", fake.gotParams.DiscoverDimension)
+	}
+
+	for _, bad := range []string{"&discover_dimension=bad%20name", "&discover_dimension=A&discover_dimension=B"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, validQuery()+bad, nil))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", bad, w.Code)
+		}
+	}
+}
