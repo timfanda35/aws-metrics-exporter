@@ -143,6 +143,8 @@ Per-request `?role_arn=`（可選）會在 base credentials 上加一層 `stscre
 | `AWS_WEB_IDENTITY_TOKEN_AUDIENCE` | `sts.amazonaws.com` | GCP ID token audience |
 | `GCP_ID_TOKEN_URL` | metadata-server 預設 | 測試時可覆寫 |
 | `DEFAULT_ROLE_ARN` | — | `?role_arn=` 省略時的 fallback |
+| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | 覆寫 CloudWatch endpoint（如 VPC private endpoint）。OAM 跨帳戶查詢也走這個，不需另設 OAM endpoint。單一固定 URL，適合單 region；WIF 路徑目前不生效。 |
+| `AWS_ENDPOINT_URL_STS` | — | 覆寫 STS endpoint；僅在使用 `?role_arn=` / `DEFAULT_ROLE_ARN` 時需要。不要設全域 `AWS_ENDPOINT_URL`。 |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | CloudTrail session 名稱 |
 | `PRESERVE_CW_TIMESTAMP` | `false` | 設為 `true` 時在 sample 上保留 CloudWatch 原始 `TimestampMs`（舊行為）。**不要**和 `?time_offset=` 一起用。 |
 

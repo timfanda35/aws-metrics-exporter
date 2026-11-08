@@ -170,6 +170,8 @@ Liveness only. Returns `200 OK` with `{"status":"ok"}`. Does not call AWS — so
 | `AWS_WEB_IDENTITY_TOKEN_AUDIENCE` | `sts.amazonaws.com` | Audience for the GCP ID token. |
 | `GCP_ID_TOKEN_URL` | metadata-server default | Override for tests. |
 | `DEFAULT_ROLE_ARN` | — | Fallback `role_arn` when query param omits it. |
+| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | Override the CloudWatch endpoint (e.g. a VPC private endpoint). This is the only endpoint needed for OAM cross-account reads. Single fixed URL, so single-region use. Not honored on the WIF path. |
+| `AWS_ENDPOINT_URL_STS` | — | Override the STS endpoint; only matters with `?role_arn=` / `DEFAULT_ROLE_ARN`. Don't set the global `AWS_ENDPOINT_URL`. |
 | `PRESERVE_CW_TIMESTAMP` | `false` | When `true`, emits CloudWatch's own datapoint timestamp as `TimestampMs` instead of leaving it unset. Don't combine with `?time_offset=` — the offset would push the emitted timestamp even further into the past, reintroducing the rejection issue this flag's default avoids. |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | Labels STS sessions in CloudTrail. |
 
