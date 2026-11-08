@@ -54,6 +54,7 @@ curl 'http://localhost:8080/metrics?account_id=123456789012&region=us-east-1&nam
 ## Quick start — Docker Compose (with LocalStack)
 
 ```bash
+cp .env.example .env   # exporter env vars are loaded from .env
 docker compose up --build
 # Exporter:   http://localhost:8080
 # Prometheus: http://localhost:9090

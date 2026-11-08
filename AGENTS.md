@@ -159,6 +159,7 @@ go vet ./...
 
 ### 啟動開發環境（含 LocalStack）
 ```bash
+cp .env.example .env   # exporter 的環境變數由 .env 載入（已 gitignore）
 docker compose up --build
 # Seed LocalStack:
 awslocal cloudwatch put-metric-data --namespace AWS/EC2 \
