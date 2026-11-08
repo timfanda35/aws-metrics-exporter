@@ -18,8 +18,15 @@ global:
     monitor: aws-metrics-exporter
 
 scrape_configs:
-  # EDIT ME: one job per (account, region, namespace).
-  - job_name: aws-ec2
+  # EDIT ME: one job per (account, region, namespace, statistic).
+  #
+  # Match the AWS console: EC2 basic monitoring publishes one datapoint per
+  # 5 minutes (use period 60 with detailed monitoring). The exporter emits
+  # CloudWatch's own timestamp (PRESERVE_CW_TIMESTAMP=true), so each sample
+  # lands at the start of its bucket like the console graph. `interval` is
+  # three periods so the newest published bucket (published a few minutes
+  # late) is always inside the query window.
+  - job_name: aws-ec2-cpu
     metrics_path: /metrics
     scheme: http
     static_configs:
@@ -30,21 +37,37 @@ scrape_configs:
       account_id: ["000000000000"]
       region: ["us-east-1"]
       namespace: ["AWS/EC2"]
-      metric_name: ["CPUUtilization", "NetworkIn"]
+      metric_name: ["CPUUtilization"]
       statistic: ["Average"]
-      # List every instance (one series per InstanceId) via ListMetrics.
-      # Needs cloudwatch:ListMetrics. Use `dimensions` instead to pin one.
       discover_dimension: ["InstanceId"]
+      period: ["300"]
+      interval: ["15m"]
       # dimensions: ["InstanceId=i-0abc123"]
-      # period: ["60"]
-      # interval: ["5m"]
       # role_arn: ["arn:aws:iam::000000000000:role/CloudWatchReader"]
       # external_id: ["..."]
 
+  # NetworkIn is bytes per period, so use Sum (as the console does).
+  - job_name: aws-ec2-network
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["exporter:8080"]
+        labels:
+          source: aws-cloudwatch
+    params:
+      account_id: ["000000000000"]
+      region: ["us-east-1"]
+      namespace: ["AWS/EC2"]
+      metric_name: ["NetworkIn"]
+      statistic: ["Sum"]
+      discover_dimension: ["InstanceId"]
+      period: ["300"]
+      interval: ["15m"]
+
   # Namespaces with a known CloudWatch ingest delay: shift the query window
   # back with time_offset so the "latest" datapoint actually exists yet.
-  # Do NOT combine with PRESERVE_CW_TIMESTAMP=true (the offset makes emitted
-  # timestamps older and brings back out-of-bounds/duplicate-sample rejection).
+  # Don't combine with PRESERVE_CW_TIMESTAMP=true unless you accept older
+  # timestamps (the point is then stored even further behind real time).
   # - job_name: aws-billing
   #   metrics_path: /metrics
   #   static_configs:

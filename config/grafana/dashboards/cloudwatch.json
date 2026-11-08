@@ -15,19 +15,12 @@
   "templating": {
     "list": [
       {
-        "name": "DS",
-        "label": "Datasource",
-        "type": "datasource",
-        "query": "prometheus",
-        "current": {}
-      },
-      {
         "name": "metric",
         "label": "Metric",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${DS}"
+          "uid": "prometheus"
         },
         "query": {
           "query": "label_values({source=\"aws-cloudwatch\"}, __name__)",
@@ -46,14 +39,14 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${DS}"
+          "uid": "prometheus"
         },
         "query": {
-          "query": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, account_id)",
+          "query": "label_values({source=\"aws-cloudwatch\"}, account_id)",
           "refId": "vaccount",
           "qryType": 1
         },
-        "definition": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, account_id)",
+        "definition": "label_values({source=\"aws-cloudwatch\"}, account_id)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -62,7 +55,8 @@
           "selected": true,
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
       },
       {
         "name": "statistic",
@@ -70,14 +64,14 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${DS}"
+          "uid": "prometheus"
         },
         "query": {
-          "query": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, statistic)",
+          "query": "label_values({source=\"aws-cloudwatch\"}, statistic)",
           "refId": "vstatistic",
           "qryType": 1
         },
-        "definition": "label_values({source=\"aws-cloudwatch\", __name__=\"$metric\"}, statistic)",
+        "definition": "label_values({source=\"aws-cloudwatch\"}, statistic)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -86,7 +80,8 @@
           "selected": true,
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
       }
     ]
   },
@@ -110,7 +105,7 @@
       "title": "AWS/EC2 CPUUtilization (%)",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
@@ -120,7 +115,10 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percent"
+          "unit": "percent",
+          "custom": {
+            "spanNulls": true
+          }
         },
         "overrides": []
       },
@@ -129,20 +127,22 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS}"
+            "uid": "prometheus"
           },
-          "expr": "aws_ec2_cpuutilization{account_id=~\"$account\", statistic=~\"$statistic\"}",
+          "expr": "last_over_time(aws_ec2_cpuutilization{account_id=~\"$account\", statistic=~\"$statistic\"}[10m])",
           "legendFormat": "{{account_id}} {{statistic}} {{InstanceId}}"
         }
-      ]
+      ],
+      "interval": "5m",
+      "description": "Latest CloudWatch datapoint; EC2 basic monitoring publishes one per 5 min, so the newest point is ~5-10 min behind real time. Timestamps match the AWS console (UTC there, browser zone here)."
     },
     {
       "id": 3,
       "type": "timeseries",
-      "title": "AWS/EC2 NetworkIn (bytes)",
+      "title": "AWS/EC2 NetworkIn (bytes per 5 min, Sum)",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 12,
@@ -152,7 +152,10 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": true
+          }
         },
         "overrides": []
       },
@@ -161,12 +164,14 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS}"
+            "uid": "prometheus"
           },
-          "expr": "aws_ec2_networkin{account_id=~\"$account\", statistic=~\"$statistic\"}",
+          "expr": "last_over_time(aws_ec2_networkin{account_id=~\"$account\", statistic=~\"$statistic\"}[10m])",
           "legendFormat": "{{account_id}} {{statistic}} {{InstanceId}}"
         }
-      ]
+      ],
+      "interval": "5m",
+      "description": "Bytes received per 5-minute period (Sum). Requires the aws-ec2-network job (statistic Sum)."
     },
     {
       "id": 4,
@@ -187,7 +192,7 @@
       "title": "$metric",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
@@ -200,9 +205,9 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS}"
+            "uid": "prometheus"
           },
-          "expr": "{source=\"aws-cloudwatch\", __name__=\"$metric\", account_id=~\"$account\", statistic=~\"$statistic\"}",
+          "expr": "last_over_time({source=\"aws-cloudwatch\", __name__=\"$metric\", account_id=~\"$account\", statistic=~\"$statistic\"}[10m])",
           "legendFormat": "{{account_id}} {{statistic}}"
         }
       ]
@@ -213,7 +218,7 @@
       "title": "Latest values",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
@@ -226,11 +231,11 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS}"
+            "uid": "prometheus"
           },
           "instant": true,
           "format": "table",
-          "expr": "{source=\"aws-cloudwatch\", __name__=\"$metric\", account_id=~\"$account\", statistic=~\"$statistic\"}"
+          "expr": "last_over_time({source=\"aws-cloudwatch\", __name__=\"$metric\", account_id=~\"$account\", statistic=~\"$statistic\"}[10m])"
         }
       ],
       "transformations": [
@@ -254,7 +259,7 @@
       "title": "Scrape up",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
@@ -267,7 +272,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS}"
+            "uid": "prometheus"
           },
           "expr": "up{source=\"aws-cloudwatch\"}",
           "legendFormat": "{{job}}"
@@ -300,7 +305,7 @@
       "title": "Scrape duration (s)",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 8,
@@ -313,7 +318,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS}"
+            "uid": "prometheus"
           },
           "expr": "scrape_duration_seconds{source=\"aws-cloudwatch\"}",
           "legendFormat": "{{job}}"

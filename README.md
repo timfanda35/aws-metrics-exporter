@@ -166,7 +166,7 @@ Liveness only. Returns `200 OK` with `{"status":"ok"}`. Does not call AWS — so
 | `DEFAULT_ROLE_ARN` | — | Fallback `role_arn` when query param omits it. |
 | `AWS_ENDPOINT_URL_CLOUDWATCH` | — | Override the CloudWatch endpoint (e.g. a VPC private endpoint). This is the only endpoint needed for OAM cross-account reads. Single fixed URL, so single-region use. Not honored on the WIF path. |
 | `AWS_ENDPOINT_URL_STS` | — | Override the STS endpoint; only matters with `?role_arn=` / `DEFAULT_ROLE_ARN`. Don't set the global `AWS_ENDPOINT_URL`. |
-| `PRESERVE_CW_TIMESTAMP` | `false` | When `true`, emits CloudWatch's own datapoint timestamp as `TimestampMs` instead of leaving it unset. Don't combine with `?time_offset=` — the offset would push the emitted timestamp even further into the past, reintroducing the rejection issue this flag's default avoids. |
+| `PRESERVE_CW_TIMESTAMP` | `false` (`.env.example` sets `true`) | When `true`, emits CloudWatch's own datapoint timestamp as `TimestampMs` instead of leaving it unset. Don't combine with `?time_offset=` — the offset would push the emitted timestamp even further into the past, reintroducing the rejection issue this flag's default avoids. |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | Labels STS sessions in CloudTrail. |
 
 CLI flag: `--healthcheck` does a loopback `GET /healthz` and exits 0/1. Used by Dockerfile / compose `HEALTHCHECK`.
@@ -202,6 +202,18 @@ scrape_configs:
       # dimensions: ["InstanceId=i-0abc123"]      # optional: pin one instance instead
       # time_offset: ["10m"]                      # optional, for namespaces with CloudWatch ingest delay
 ```
+
+### Match the AWS console
+
+The exporter's default is to let Prometheus stamp scrape time (`PRESERVE_CW_TIMESTAMP=false`), so values appear a few minutes after CloudWatch's own time and repeat between datapoints. To store each sample at the same time and value as the AWS console, `.env.example` and `config/prometheus.yml.example` use:
+
+- `PRESERVE_CW_TIMESTAMP=true` — samples carry CloudWatch's datapoint timestamp (start of the bucket, as in the console). Only the newest datapoint is emitted per scrape, so a series' timestamps never go backwards and an unchanged datapoint re-sent on the next scrape is ignored by Prometheus.
+- `period: ["300"]` for EC2 basic monitoring (one datapoint per 5 min; use `60` with detailed monitoring) and `interval: ["15m"]` so the newest published bucket is always inside the query window.
+- One job per `statistic`: `Average` for `CPUUtilization`, `Sum` for `NetworkIn` (bytes per period, as the console shows).
+- Keep `scrape_interval` at or below the period; a longer interval skips buckets.
+- Grafana panels wrap queries in `last_over_time(...[10m])`, so a series with 5-minute spacing stays continuous under Prometheus's default 5m lookback.
+
+Limits: a datapoint is published roughly 1–5 minutes after its bucket ends, so the newest point still lags real time by about 5–10 minutes (in the AWS console too). If CloudWatch later revises a bucket you already scraped, Prometheus rejects the same timestamp with a different value, so the stored value can differ slightly from the console's final one (watch `prometheus_target_scrapes_sample_duplicate_timestamp_total`, `..._out_of_order_total`, `..._out_of_bounds_total`). Avoid combining with `time_offset`, which makes timestamps older.
 
 ## Development
 

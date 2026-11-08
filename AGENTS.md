@@ -149,7 +149,7 @@ Per-request `?role_arn=`（可選）會在 base credentials 上加一層 `stscre
 | `AWS_ENDPOINT_URL_CLOUDWATCH` | — | 覆寫 CloudWatch endpoint（如 VPC private endpoint）。OAM 跨帳戶查詢也走這個，不需另設 OAM endpoint。單一固定 URL，適合單 region；WIF 路徑目前不生效。 |
 | `AWS_ENDPOINT_URL_STS` | — | 覆寫 STS endpoint；僅在使用 `?role_arn=` / `DEFAULT_ROLE_ARN` 時需要。不要設全域 `AWS_ENDPOINT_URL`。 |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | CloudTrail session 名稱 |
-| `PRESERVE_CW_TIMESTAMP` | `false` | 設為 `true` 時在 sample 上保留 CloudWatch 原始 `TimestampMs`（舊行為）。**不要**和 `?time_offset=` 一起用。 |
+| `PRESERVE_CW_TIMESTAMP` | `false`（`.env.example` 設為 `true`） | 設為 `true` 時在 sample 上保留 CloudWatch 原始 `TimestampMs`，讓 Prometheus 與 AWS Console 的時間／數值對齊（搭配 `period=300`、`interval=15m`；見 README「Match the AWS console」）。只輸出最新資料點，timestamp 不會倒退；CloudWatch 事後修正同一區間數值時會被 Prometheus 以 duplicate 拒收。**不要**和 `?time_offset=` 一起用。 |
 
 ---
 
