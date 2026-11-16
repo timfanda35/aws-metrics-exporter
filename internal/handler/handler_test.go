@@ -297,11 +297,11 @@ func TestServeHTTP_DiscoverDimension(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	if fake.gotParams.DiscoverDimension != "InstanceId" {
-		t.Errorf("DiscoverDimension = %q, want InstanceId", fake.gotParams.DiscoverDimension)
+	if !equalStrings(fake.gotParams.DiscoverDimensions, []string{"InstanceId"}) {
+		t.Errorf("DiscoverDimensions = %v, want [InstanceId]", fake.gotParams.DiscoverDimensions)
 	}
 
-	for _, bad := range []string{"&discover_dimension=bad%20name", "&discover_dimension=A&discover_dimension=B"} {
+	for _, bad := range []string{"&discover_dimension=bad%20name", "&discover_dimension=A&discover_dimension=A"} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, validQuery()+bad, nil))
 		if w.Code != http.StatusBadRequest {

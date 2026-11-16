@@ -95,14 +95,15 @@ type QueryParams struct {
 	// labels.
 	Dimensions []Dimension
 
-	// DiscoverDimension, when set (e.g. "InstanceId"), makes the
-	// collector call ListMetrics first and query one series per
-	// discovered dimension set whose dimension names are exactly
-	// {DiscoverDimension} plus the names in Dimensions. Aggregate
+	// DiscoverDimensions, when set (e.g. ["InstanceId"], or
+	// ["BucketName","StorageType"] for S3), makes the collector call
+	// ListMetrics first and query one series per discovered dimension
+	// set whose dimension names are exactly DiscoverDimensions plus the
+	// names in Dimensions. Aggregate
 	// metrics (e.g. AutoScalingGroupName) and metrics with additional
 	// dimensions are ignored. Dimensions then act as extra fixed
 	// filters. Empty (default) queries only the Dimensions given.
-	DiscoverDimension string
+	DiscoverDimensions []string
 
 	// Period is the CloudWatch aggregation period in seconds. Zero
 	// defaults to 60.
@@ -225,7 +226,7 @@ func (c *CloudWatchCollector) Collect(ctx context.Context, params QueryParams) (
 		return nil, err
 	}
 	queries, idToCtx := buildMetricDataQueries(params, targets, stats, period)
-	if params.DiscoverDimension != "" && len(queries) > c.maxSeries {
+	if len(params.DiscoverDimensions) > 0 && len(queries) > c.maxSeries {
 		return nil, fmt.Errorf("%w: discovered %d queries, limit=%d", ErrMaxSeriesExceeded, len(queries), c.maxSeries)
 	}
 
@@ -283,10 +284,10 @@ type target struct {
 }
 
 // resolveTargets returns the metric identities to query. Without
-// DiscoverDimension it is the MetricNames x the request's Dimensions;
+// DiscoverDimensions it is the MetricNames x the request's Dimensions;
 // with it, ListMetrics supplies the dimension sets.
 func (c *CloudWatchCollector) resolveTargets(ctx context.Context, params QueryParams) ([]target, error) {
-	if params.DiscoverDimension == "" {
+	if len(params.DiscoverDimensions) == 0 {
 		out := make([]target, 0, len(params.MetricNames))
 		for _, name := range params.MetricNames {
 			out = append(out, target{metricName: name, dims: params.Dimensions})
@@ -294,8 +295,12 @@ func (c *CloudWatchCollector) resolveTargets(ctx context.Context, params QueryPa
 		return out, nil
 	}
 
-	wantNames := map[string]struct{}{params.DiscoverDimension: {}}
-	filters := []cwtypes.DimensionFilter{{Name: aws.String(params.DiscoverDimension)}}
+	wantNames := map[string]struct{}{}
+	var filters []cwtypes.DimensionFilter
+	for _, n := range params.DiscoverDimensions {
+		wantNames[n] = struct{}{}
+		filters = append(filters, cwtypes.DimensionFilter{Name: aws.String(n)})
+	}
 	for _, d := range params.Dimensions {
 		wantNames[d.Name] = struct{}{}
 		filters = append(filters, cwtypes.DimensionFilter{Name: aws.String(d.Name), Value: aws.String(d.Value)})

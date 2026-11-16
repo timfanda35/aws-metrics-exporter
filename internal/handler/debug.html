@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exporter Debug</title>
+<style>
+  :root { --bg:#fff; --fg:#1b1f24; --muted:#6a737d; --line:#d0d7de; --accent:#0969da; --code:#f6f8fa; --err:#cf222e; --ok:#1a7f37; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --line:#30363d; --accent:#58a6ff; --code:#161b22; --err:#ff7b72; --ok:#3fb950; } }
+  body { background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; margin:0; padding:16px; }
+  main { max-width:960px; margin:0 auto; }
+  h1 { font-size:20px; } h2 { font-size:15px; margin:20px 0 6px; }
+  form { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+  label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); gap:2px; }
+  input, textarea, select { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  textarea { min-height:60px; }
+  .wide { grid-column:1/-1; }
+  button { font:inherit; background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 16px; cursor:pointer; }
+  pre { background:var(--code); border:1px solid var(--line); border-radius:6px; padding:10px; overflow:auto; max-height:420px; white-space:pre-wrap; word-break:break-all; }
+  .meta { color:var(--muted); } .err { color:var(--err); } .ok { color:var(--ok); }
+  .warn { border:1px solid var(--line); border-radius:6px; padding:8px 10px; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Exporter debug</h1>
+  <p class="warn">Runs real CloudWatch queries with the exporter's credentials. Keep DEBUG_PAGE_ENABLED off anywhere this port is reachable by untrusted users.</p>
+  <form id="f">
+    <label>account_id<input name="account_id" required pattern="\d{12}" placeholder="123456789012"></label>
+    <label>region<input name="region" required placeholder="us-west-2"></label>
+    <label>namespace<input name="namespace" required value="AWS/EC2"></label>
+    <label>statistic (comma separated)<input name="statistic" value="Average"></label>
+    <label class="wide">metric_name (comma or newline separated)<textarea name="metric_name" required>CPUUtilization</textarea></label>
+    <label class="wide">dimensions (Name=Value, one per line)<textarea name="dimensions"></textarea></label>
+    <label>discover_dimension (comma or newline separated)<input name="discover_dimension" placeholder="InstanceId  or  BucketName, StorageType"></label>
+    <label>period (s)<input name="period" value="300"></label>
+    <label>interval<input name="interval" value="15m"></label>
+    <label>time_offset<input name="time_offset" placeholder="0"></label>
+    <label>role_arn<input name="role_arn"></label>
+    <label>external_id<input name="external_id"></label>
+    <div class="wide"><button type="submit">Run query</button></div>
+  </form>
+
+  <h2>Request URL <span class="meta">(use the same keys under Prometheus <code>params</code>)</span></h2>
+  <pre id="url">-</pre>
+  <h2>Result <span id="status" class="meta"></span></h2>
+  <pre id="body">-</pre>
+  <h2>Calls sent to AWS</h2>
+  <pre id="calls">-</pre>
+</main>
+<script>
+const f = document.getElementById('f');
+const $ = id => document.getElementById(id);
+function split(v, re) { return v.split(re).map(s => s.trim()).filter(Boolean); }
+f.addEventListener('submit', async e => {
+  e.preventDefault();
+  const d = new FormData(f);
+  const p = new URLSearchParams();
+  for (const k of ['account_id','region','namespace','period','interval','time_offset','role_arn','external_id']) {
+    const v = (d.get(k) || '').trim(); if (v) p.append(k, v);
+  }
+  split(d.get('metric_name'), /[,\n]/).forEach(v => p.append('metric_name', v));
+  split(d.get('statistic'), /[,\n]/).forEach(v => p.append('statistic', v));
+  split(d.get('discover_dimension'), /[,\n]/).forEach(v => p.append('discover_dimension', v));
+  split(d.get('dimensions'), /\n/).forEach(v => p.append('dimensions', v));
+  const qs = p.toString();
+  $('url').textContent = location.origin + '/metrics?' + qs;
+  $('status').textContent = 'running...'; $('status').className = 'meta';
+  try {
+    const r = await fetch('/debug/run?' + qs);
+    const j = await r.json();
+    $('status').textContent = 'HTTP ' + j.status + ' in ' + j.elapsed_ms + ' ms';
+    $('status').className = j.status === 200 ? 'ok' : 'err';
+    $('body').textContent = j.body || '(empty body: no series matched)';
+    $('calls').textContent = j.aws_calls.length ? JSON.stringify(j.aws_calls, null, 2) : '(no AWS call was made)';
+  } catch (err) {
+    $('status').textContent = String(err); $('status').className = 'err';
+  }
+});
+</script>
+</body>
+</html>

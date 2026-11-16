@@ -47,6 +47,8 @@ type config struct {
 	DefaultRoleARN      string
 	RoleSessionName     string
 	PreserveCWTimestamp bool
+	DebugPageEnabled    bool
+	Endpoints           collector.Endpoints
 }
 
 const defaultPort = 8080
@@ -136,6 +138,20 @@ func loadConfig() (config, error) {
 		cfg.PreserveCWTimestamp = b
 	}
 
+	if v := os.Getenv("DEBUG_PAGE_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid DEBUG_PAGE_ENABLED %q: must be a boolean", v)
+		}
+		cfg.DebugPageEnabled = b
+	}
+
+	ep, err := collector.ParseEndpoints(os.Environ())
+	if err != nil {
+		return config{}, err
+	}
+	cfg.Endpoints = ep
+
 	return cfg, nil
 }
 
@@ -217,6 +233,7 @@ func main() {
 		WIFTokenFile:    cfg.AWSWebIdentityFile,
 		GCPIDTokenURL:   cfg.GCPIDTokenURL,
 		RoleSessionName: cfg.RoleSessionName,
+		STSEndpoint:     cfg.Endpoints.STS[cfg.AWSRegion],
 	}
 	baseAWS, err := auth.NewAWSConfig(context.Background(), authCfg)
 	if err != nil {
@@ -224,7 +241,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	cache := collector.NewClientCache(baseAWS, cfg.RoleSessionName)
+	cache := collector.NewClientCache(baseAWS, cfg.RoleSessionName).
+		WithEndpoints(cfg.Endpoints).
+		WithLogger(logger)
 
 	limits := handler.Limits{
 		ScrapeTimeout:  cfg.ScrapeTimeout,
@@ -249,6 +268,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metricsHandler)
 	mux.HandleFunc("/healthz", handler.HandleHealthz)
+	if cfg.DebugPageEnabled {
+		handler.RegisterDebug(mux, metricsHandler)
+	}
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -273,6 +295,8 @@ func main() {
 		slog.Bool("wif_enabled", cfg.AWSRoleARN != ""),
 		slog.Bool("default_role_arn_set", cfg.DefaultRoleARN != ""),
 		slog.Bool("preserve_cw_timestamp", cfg.PreserveCWTimestamp),
+		slog.Bool("debug_page_enabled", cfg.DebugPageEnabled),
+		slog.Any("endpoint_override_regions", cfg.Endpoints.Regions()),
 	)
 
 	select {

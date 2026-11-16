@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,8 +34,25 @@ type ClientCache struct {
 	// roleSessionName labels STS sessions for the AssumeRole wrap.
 	roleSessionName string
 
+	endpoints Endpoints
+	logger    *slog.Logger
+
 	mu      sync.Mutex
 	clients map[string]CloudWatchAPI
+}
+
+// WithEndpoints sets per-region endpoint overrides (see [ParseEndpoints]).
+// Call before the first Get.
+func (c *ClientCache) WithEndpoints(e Endpoints) *ClientCache {
+	c.endpoints = e
+	return c
+}
+
+// WithLogger sets the logger used for debug-level AWS call logging.
+// Call before the first Get.
+func (c *ClientCache) WithLogger(l *slog.Logger) *ClientCache {
+	c.logger = l
+	return c
 }
 
 // NewClientCache returns an empty cache. The provided base
@@ -77,7 +95,11 @@ func (c *ClientCache) Get(ctx context.Context, region, roleARN, externalID strin
 	awsCfg.Region = region
 
 	if roleARN != "" {
-		stsClient := sts.NewFromConfig(awsCfg)
+		var stsOpts []func(*sts.Options)
+		if u := c.endpoints.STS[region]; u != "" {
+			stsOpts = append(stsOpts, func(o *sts.Options) { o.BaseEndpoint = aws.String(u) })
+		}
+		stsClient := sts.NewFromConfig(awsCfg, stsOpts...)
 		provider := stscreds.NewAssumeRoleProvider(stsClient, roleARN,
 			func(o *stscreds.AssumeRoleOptions) {
 				o.RoleSessionName = c.roleSessionName
@@ -89,8 +111,16 @@ func (c *ClientCache) Get(ctx context.Context, region, roleARN, externalID strin
 		awsCfg.Credentials = aws.NewCredentialsCache(provider)
 	}
 
-	cli := cloudwatch.NewFromConfig(awsCfg, c.cwOpts...)
-	wrapped := NewCloudWatchAdapter(cli)
+	cwOpts := c.cwOpts
+	endpoint := c.endpoints.CloudWatch[region]
+	if endpoint != "" {
+		// Placed first so explicit constructor opts (tests) still win.
+		cwOpts = append([]func(*cloudwatch.Options){
+			func(o *cloudwatch.Options) { o.BaseEndpoint = aws.String(endpoint) },
+		}, cwOpts...)
+	}
+	cli := cloudwatch.NewFromConfig(awsCfg, cwOpts...)
+	wrapped := newTracingClient(NewCloudWatchAdapter(cli), c.logger, region, endpoint)
 	c.clients[key] = wrapped
 	return wrapped, nil
 }
