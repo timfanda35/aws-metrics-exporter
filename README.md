@@ -103,7 +103,7 @@ The exporter fetches a GCP ID token from the Cloud Run metadata server on each S
 | `metric_name` | yes (repeatable) | — | One CloudWatch metric per occurrence. Chunked at 500 per call. |
 | `statistic` | no (repeatable) | `Average` | One of `Average`, `Sum`, `Minimum`, `Maximum`, `SampleCount`. Emitted as `statistic` label. |
 | `dimensions` | no (repeatable) | — | `Name=Value`; applied to every `metric_name`. |
-| `discover_dimension` | no | — | Dimension name (e.g. `InstanceId`). The exporter calls `ListMetrics` and returns one series per discovered dimension set whose names are exactly this dimension plus any `dimensions` given (aggregates like `AutoScalingGroupName` are ignored). Needs `cloudwatch:ListMetrics`; capped by `MAX_SERIES_PER_REQUEST`. |
+| `discover_dimension` | no, repeatable | — | Dimension name (e.g. `InstanceId`; for S3 repeat it for `BucketName` and `StorageType`). The exporter calls `ListMetrics` and returns one series per discovered dimension set whose names are exactly these dimensions plus any `dimensions` given (aggregates like `AutoScalingGroupName` are ignored). Needs `cloudwatch:ListMetrics`; capped by `MAX_SERIES_PER_REQUEST`. |
 | `period` | no | `60` | CloudWatch aggregation period (seconds). Must be 1/5/10/30 or a multiple of 60. |
 | `interval` | no | `5m` | Query window (Go duration). |
 | `time_offset` | no | `0` | Shift the query window back (Go duration, must be ≥ 0): `EndTime = now - time_offset`. Use when a namespace's CloudWatch ingest delay exceeds the default window. |
@@ -164,8 +164,10 @@ Liveness only. Returns `200 OK` with `{"status":"ok"}`. Does not call AWS — so
 | `AWS_WEB_IDENTITY_TOKEN_AUDIENCE` | `sts.amazonaws.com` | Audience for the GCP ID token. |
 | `GCP_ID_TOKEN_URL` | metadata-server default | Override for tests. |
 | `DEFAULT_ROLE_ARN` | — | Fallback `role_arn` when query param omits it. |
-| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | Override the CloudWatch endpoint (e.g. a VPC private endpoint). This is the only endpoint needed for OAM cross-account reads. Single fixed URL, so single-region use. Not honored on the WIF path. |
-| `AWS_ENDPOINT_URL_STS` | — | Override the STS endpoint; only matters with `?role_arn=` / `DEFAULT_ROLE_ARN`. Don't set the global `AWS_ENDPOINT_URL`. |
+| `AWS_ENDPOINT_URL_CLOUDWATCH_<REGION>` | — | Per-region CloudWatch endpoint override (e.g. a VPC private endpoint; VPCE hostnames differ per region). `<REGION>` is the region upper-cased with `-` → `_`, e.g. `AWS_ENDPOINT_URL_CLOUDWATCH_US_WEST_2`. Also serves OAM cross-account reads. Must be an `https://` URL; checked at startup. Applies on the WIF path too. |
+| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | SDK-standard single URL used for any region without a per-region entry. |
+| `AWS_ENDPOINT_URL_STS_<REGION>` / `AWS_ENDPOINT_URL_STS` | — | Same pattern for STS; only matters with `?role_arn=` / `DEFAULT_ROLE_ARN` or WIF. Don't set the global `AWS_ENDPOINT_URL`. |
+| `DEBUG_PAGE_ENABLED` | `false` (`.env.example` sets `true`) | Serves `GET /debug` (query form) and `GET /debug/run`. They query AWS with the exporter's credentials: never enable on a publicly reachable port. |
 | `PRESERVE_CW_TIMESTAMP` | `false` (`.env.example` sets `true`) | When `true`, emits CloudWatch's own datapoint timestamp as `TimestampMs` instead of leaving it unset. Don't combine with `?time_offset=` — the offset would push the emitted timestamp even further into the past, reintroducing the rejection issue this flag's default avoids. |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | Labels STS sessions in CloudTrail. |
 
@@ -260,3 +262,8 @@ config/              # Prometheus scrape config (dev)
 ## License
 
 [MIT](LICENSE)
+
+## Debugging
+
+- **Debug page** — with `DEBUG_PAGE_ENABLED=true`, open `http://localhost:8080/debug`. Fill in the same parameters Prometheus would send; the page shows the equivalent `/metrics?...` URL (use the keys under `params`), the exposition text, the status, and the CloudWatch calls (`GetMetricData` / `ListMetrics`) that were made.
+- **AWS query log** — with `LOG_LEVEL=debug`, every call sent to CloudWatch is logged as `cloudwatch request` (region, endpoint, time window, each query's account/namespace/metric/dimensions/stat, result count, latency, error).

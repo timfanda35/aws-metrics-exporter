@@ -63,6 +63,10 @@ type Config struct {
 	// for WIF token exchange.
 	Region string
 
+	// STSEndpoint overrides the STS endpoint used for the WIF token
+	// exchange (e.g. a VPC private endpoint). Empty means the SDK default.
+	STSEndpoint string
+
 	// WIFAudience is the OIDC audience requested when fetching the GCP
 	// identity token from the metadata server. Empty means
 	// [DefaultWIFAudience].
@@ -142,7 +146,12 @@ func NewAWSConfig(ctx context.Context, cfg Config) (aws.Config, error) {
 		if stsRegion == "" {
 			stsRegion = "us-east-1"
 		}
-		stsClient := sts.NewFromConfig(aws.Config{Region: stsRegion})
+		var stsOpts []func(*sts.Options)
+		if cfg.STSEndpoint != "" {
+			ep := cfg.STSEndpoint
+			stsOpts = append(stsOpts, func(o *sts.Options) { o.BaseEndpoint = aws.String(ep) })
+		}
+		stsClient := sts.NewFromConfig(aws.Config{Region: stsRegion}, stsOpts...)
 
 		var retriever stscreds.IdentityTokenRetriever
 		if cfg.WIFTokenFile != "" {

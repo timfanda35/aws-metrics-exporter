@@ -114,18 +114,18 @@ func (h *MetricsHandler) Limits() Limits {
 
 // requestParams is the parsed shape of an inbound /metrics request.
 type requestParams struct {
-	accountID   string
-	region      string
-	namespace   string
-	metricNames []string
-	statistics  []string
-	dimensions  []collector.Dimension
-	discoverDim string
-	period      int32
-	interval    time.Duration
-	timeOffset  time.Duration
-	roleARN     string
-	externalID  string
+	accountID    string
+	region       string
+	namespace    string
+	metricNames  []string
+	statistics   []string
+	dimensions   []collector.Dimension
+	discoverDims []string
+	period       int32
+	interval     time.Duration
+	timeOffset   time.Duration
+	roleARN      string
+	externalID   string
 }
 
 // parseRequest validates and extracts query parameters per the API
@@ -184,16 +184,16 @@ func parseRequest(r *http.Request, limits Limits) (*requestParams, string, int) 
 		return nil, errMsg, http.StatusBadRequest
 	}
 
-	discoverVals := q["discover_dimension"]
-	if len(discoverVals) > 1 {
-		return nil, "multiple discover_dimension values are not supported", http.StatusBadRequest
-	}
-	discoverDim := ""
-	if len(discoverVals) == 1 {
-		discoverDim = discoverVals[0]
-		if !dimNamePattern.MatchString(discoverDim) {
-			return nil, fmt.Sprintf("invalid discover_dimension %q: must be a CloudWatch dimension name, e.g. InstanceId", discoverDim), http.StatusBadRequest
+	discoverDims := q["discover_dimension"]
+	seenDisc := map[string]struct{}{}
+	for _, d := range discoverDims {
+		if !dimNamePattern.MatchString(d) {
+			return nil, fmt.Sprintf("invalid discover_dimension %q: must be a CloudWatch dimension name, e.g. InstanceId", d), http.StatusBadRequest
 		}
+		if _, dup := seenDisc[d]; dup {
+			return nil, fmt.Sprintf("duplicate discover_dimension %q", d), http.StatusBadRequest
+		}
+		seenDisc[d] = struct{}{}
 	}
 
 	period := int32(60)
@@ -240,18 +240,18 @@ func parseRequest(r *http.Request, limits Limits) (*requestParams, string, int) 
 	}
 
 	return &requestParams{
-		accountID:   accountID,
-		region:      region,
-		namespace:   namespace,
-		metricNames: metricNames,
-		statistics:  statistics,
-		dimensions:  dims,
-		discoverDim: discoverDim,
-		period:      period,
-		interval:    interval,
-		timeOffset:  timeOffset,
-		roleARN:     roleARN,
-		externalID:  externalID,
+		accountID:    accountID,
+		region:       region,
+		namespace:    namespace,
+		metricNames:  metricNames,
+		statistics:   statistics,
+		dimensions:   dims,
+		discoverDims: discoverDims,
+		period:       period,
+		interval:     interval,
+		timeOffset:   timeOffset,
+		roleARN:      roleARN,
+		externalID:   externalID,
 	}, "", 0
 }
 
@@ -310,7 +310,7 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Int("metric_count", len(params.metricNames)),
 		slog.Int("statistic_count", len(params.statistics)),
 		slog.Bool("role_arn_set", params.roleARN != ""),
-		slog.String("discover_dimension", params.discoverDim),
+		slog.Any("discover_dimension", params.discoverDims),
 	}
 
 	c, err := h.collectorForKey(ctx, params.region, params.roleARN, params.externalID)
@@ -322,16 +322,16 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	awsStart := h.now()
 	families, err := c.Collect(ctx, collector.QueryParams{
-		AccountID:         params.accountID,
-		Region:            params.region,
-		Namespace:         params.namespace,
-		MetricNames:       params.metricNames,
-		Statistics:        params.statistics,
-		Dimensions:        params.dimensions,
-		DiscoverDimension: params.discoverDim,
-		Period:            params.period,
-		Interval:          params.interval,
-		TimeOffset:        params.timeOffset,
+		AccountID:          params.accountID,
+		Region:             params.region,
+		Namespace:          params.namespace,
+		MetricNames:        params.metricNames,
+		Statistics:         params.statistics,
+		Dimensions:         params.dimensions,
+		DiscoverDimensions: params.discoverDims,
+		Period:             params.period,
+		Interval:           params.interval,
+		TimeOffset:         params.timeOffset,
 	})
 	awsLatency := elapsedMs(h.now(), awsStart)
 

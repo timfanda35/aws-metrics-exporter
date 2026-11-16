@@ -33,10 +33,13 @@ aws-metrics-exporter/
 │   │   └── auth.go               # WIF-first composite credential provider；GCP metadata 抓 ID token
 │   ├── collector/
 │   │   ├── client.go             # 窄介面 CloudWatchAPI（GetMetricData）
-│   │   ├── cache.go              # (region, roleARN) keyed client cache；AssumeRole 包裝
+│   │   ├── cache.go              # (region, roleARN) keyed client cache；AssumeRole 包裝；per-region endpoint
+│   │   ├── endpoints.go          # 解析 AWS_ENDPOINT_URL_{CLOUDWATCH,STS}_<REGION>
+│   │   ├── trace.go              # CloudWatchAPI decorator：debug log + per-request trace
 │   │   └── collector.go          # GetMetricData → []*dto.MetricFamily
 │   ├── handler/
-│   │   └── handler.go            # HTTP /metrics + /healthz；參數驗證、semaphore、錯誤對應
+│   │   ├── handler.go            # HTTP /metrics + /healthz；參數驗證、semaphore、錯誤對應
+│   │   └── debug.go / debug.html # /debug 頁面與 /debug/run（DEBUG_PAGE_ENABLED）
 │   └── integration/
 │       └── integration_test.go   # //go:build integration 端對端測試
 └── config/
@@ -72,7 +75,7 @@ aws-metrics-exporter/
 ### `internal/handler`
 - 實作 `GET /metrics` 與 `GET /healthz`
 - `/metrics`：
-  - 嚴格參數驗證（正則）：`account_id`（12 位數字）、`region`、`namespace`、`metric_name`（可重複）、`statistic`、`dimensions`（`Name=Value`）、`discover_dimension`（單一維度名稱）、`period`（1/5/10/30 或 60 的倍數）、`interval`（Go duration）、`time_offset`（Go duration，需 ≥ 0）、`role_arn`、`external_id`
+  - 嚴格參數驗證（正則）：`account_id`（12 位數字）、`region`、`namespace`、`metric_name`（可重複）、`statistic`、`dimensions`（`Name=Value`）、`discover_dimension`（維度名稱，可重複）、`period`（1/5/10/30 或 60 的倍數）、`interval`（Go duration）、`time_offset`（Go duration，需 ≥ 0）、`role_arn`、`external_id`
   - **不允許** `account_id` 重複——一個 request 只查一個帳戶；多帳戶 fan-out 由 Prometheus relabel_configs 處理
   - Non-blocking semaphore（`MAX_CONCURRENT_SCRAPES`）→ 滿載時 429 + `Retry-After: 1`
   - Per-request `context.WithTimeout(SCRAPE_TIMEOUT)`
@@ -99,7 +102,7 @@ aws-metrics-exporter/
 | `metric_name` | ✅ 可重複 | — | 一次可指定多個 metric。超過 500 自動 chunk。 |
 | `statistic` | ❌ 可重複 | `Average` | `Average`/`Sum`/`Minimum`/`Maximum`/`SampleCount`。 |
 | `dimensions` | ❌ 可重複 | — | `Name=Value`；套用到每個 metric_name。 |
-| `discover_dimension` | ❌ | — | 維度名稱（如 `InstanceId`）。exporter 先呼叫 `ListMetrics`，每個「維度名稱恰為此維度＋`dimensions` 所列」的組合回傳一條 series（忽略 ASG 等聚合 metric）。需 `cloudwatch:ListMetrics`，受 `MAX_SERIES_PER_REQUEST` 限制。 |
+| `discover_dimension` | ❌ 可重複 | — | 維度名稱（如 `InstanceId`；S3 用 `BucketName`+`StorageType` 各一次）。exporter 先呼叫 `ListMetrics`，每個「維度名稱恰為這些維度＋`dimensions` 所列」的組合回傳一條 series（忽略 ASG 等聚合 metric）。需 `cloudwatch:ListMetrics`，受 `MAX_SERIES_PER_REQUEST` 限制。 |
 | `period` | ❌ | `60` | CloudWatch period（秒）。 |
 | `interval` | ❌ | `5m` | 查詢時間視窗（Go duration）。 |
 | `time_offset` | ❌ | `0` | 把查詢視窗往回推移（Go duration，需 ≥ 0）：`EndTime = now - time_offset`。用於補償特定 namespace 的 CloudWatch ingest delay；在 Prometheus 以獨立 job 的 `params: time_offset` 設定（見 `config/prometheus.yml.example`）。 |
@@ -146,8 +149,10 @@ Per-request `?role_arn=`（可選）會在 base credentials 上加一層 `stscre
 | `AWS_WEB_IDENTITY_TOKEN_AUDIENCE` | `sts.amazonaws.com` | GCP ID token audience |
 | `GCP_ID_TOKEN_URL` | metadata-server 預設 | 測試時可覆寫 |
 | `DEFAULT_ROLE_ARN` | — | `?role_arn=` 省略時的 fallback |
-| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | 覆寫 CloudWatch endpoint（如 VPC private endpoint）。OAM 跨帳戶查詢也走這個，不需另設 OAM endpoint。單一固定 URL，適合單 region；WIF 路徑目前不生效。 |
-| `AWS_ENDPOINT_URL_STS` | — | 覆寫 STS endpoint；僅在使用 `?role_arn=` / `DEFAULT_ROLE_ARN` 時需要。不要設全域 `AWS_ENDPOINT_URL`。 |
+| `AWS_ENDPOINT_URL_CLOUDWATCH_<REGION>` | — | 每個 region 各自覆寫 CloudWatch endpoint（VPC private endpoint 的網址每個 region 不同）。`<REGION>` 為 region 大寫、`-` 換成 `_`，如 `..._US_WEST_2`。OAM 跨帳戶查詢也走這個。需為 `https://` URL，啟動時驗證；WIF 路徑同樣生效。由 `collector.ParseEndpoints` 解析，`ClientCache` 依 region 設 `BaseEndpoint`。 |
+| `AWS_ENDPOINT_URL_CLOUDWATCH` | — | SDK 標準單一 URL，沒有對應 per-region 設定的 region 才使用。 |
+| `AWS_ENDPOINT_URL_STS_<REGION>` / `AWS_ENDPOINT_URL_STS` | — | STS 同樣規則；僅在 `?role_arn=` / `DEFAULT_ROLE_ARN` 或 WIF 時需要。不要設全域 `AWS_ENDPOINT_URL`。 |
+| `DEBUG_PAGE_ENABLED` | `false`（`.env.example` 設為 `true`） | 開啟 `GET /debug`（查詢表單）與 `GET /debug/run`。會以 exporter 的憑證查 AWS，**不要**在公開 port 開啟。`LOG_LEVEL=debug` 時另會記錄每個送往 CloudWatch 的呼叫（`cloudwatch request`）。 |
 | `ROLE_SESSION_NAME` | `aws-metrics-exporter` | CloudTrail session 名稱 |
 | `PRESERVE_CW_TIMESTAMP` | `false`（`.env.example` 設為 `true`） | 設為 `true` 時在 sample 上保留 CloudWatch 原始 `TimestampMs`，讓 Prometheus 與 AWS Console 的時間／數值對齊（搭配 `period=300`、`interval=15m`；見 README「Match the AWS console」）。只輸出最新資料點，timestamp 不會倒退；CloudWatch 事後修正同一區間數值時會被 Prometheus 以 duplicate 拒收。**不要**和 `?time_offset=` 一起用。 |
 
